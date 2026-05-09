@@ -1268,15 +1268,35 @@ function App() {
           .filter(pt=>{ const cn=extractChNum(pt.label); return cn!==null&&!pt.interpolated; })
           .map(pt=>({...pt,chNum:extractChNum(pt.label)}))
           .sort((a,b)=>a.chNum-b.chNum);
+        // Keep non-interpolated points in their original logged order
         const nonInterp = withNew.filter(pt=>!pt.interpolated);
         const interpolated = buildInterpolated(anchors);
-        const allPts = [...nonInterp,...interpolated];
-        allPts.sort((a,b)=>{
-          const ca=extractChNum(a.label),cb=extractChNum(b.label);
-          if(ca!==null&&cb!==null) return ca-cb;
-          if(ca!==null) return -1; if(cb!==null) return 1; return 0;
-        });
-        return allPts;
+        // Merge interpolated chapters INTO the numeric positions between anchors,
+        // but freeform points (no chapter number) stay exactly where they were logged
+        const result = [];
+        let interpIdx = 0;
+        for (let i = 0; i < nonInterp.length; i++) {
+          const pt = nonInterp[i];
+          const cn = extractChNum(pt.label);
+          const nextPt = nonInterp[i+1];
+          const nextCn = nextPt ? extractChNum(nextPt.label) : null;
+          result.push(pt);
+          // insert interpolated points that fall between this anchor and the next
+          if (cn !== null && nextCn !== null) {
+            while (interpIdx < interpolated.length) {
+              const ic = extractChNum(interpolated[interpIdx].label);
+              if (ic !== null && ic > cn && ic < nextCn) {
+                result.push(interpolated[interpIdx]);
+                interpIdx++;
+              } else break;
+            }
+          }
+        }
+        // append any remaining interpolated points after the last anchor
+        while (interpIdx < interpolated.length) {
+          result.push(interpolated[interpIdx++]);
+        }
+        return result;
       };
 
       if (reads) {
