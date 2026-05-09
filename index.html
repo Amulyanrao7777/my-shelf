@@ -335,11 +335,15 @@ function CurveGraph({ curve }) {
         ))}
         <polyline points={polyline} fill="none" stroke={C.accent} strokeWidth="2.5" strokeLinejoin="round" strokeLinecap="round"/>
         {pts.map((p,i)=>{
-          const star=(cx,cy,r)=>{const ir=r*0.25;return Array.from({length:4},(_,k)=>{const a1=-Math.PI/2+(k*Math.PI/2);const a2=-Math.PI/2+((k+0.5)*Math.PI/2);return `${cx+r*Math.cos(a1)},${cy+r*Math.sin(a1)} ${cx+ir*Math.cos(a2)},${cy+ir*Math.sin(a2)}`;}).join(' ');};
-          return <polygon key={i} points={star(p.x,p.y,6)} fill={C.accent} style={{ cursor:"pointer" }}
+          const cx=p.x,cy=p.y,w=3.8,h=5,nh=3.5;
+          const d=`M${cx},${cy-h} C${cx+w},${cy-h} ${cx+w},${cy} ${cx},${cy} C${cx-w},${cy} ${cx-w},${cy-h} ${cx},${cy-h}Z M${cx},${cy} C${cx+w},${cy} ${cx+nh*0.7},${cy+nh} ${cx},${cy+nh*0.75} C${cx-nh*0.7},${cy+nh} ${cx-w},${cy} ${cx},${cy}Z`;
+          return <g key={i} style={{ cursor:"pointer" }}
             onMouseEnter={()=>setTooltip({...p,i})}
             onMouseLeave={()=>setTooltip(null)}
-            onClick={()=>setTooltip(t=>t?.i===i?null:{...p,i})}/>;
+            onClick={()=>setTooltip(t=>t?.i===i?null:{...p,i})}>
+            <path d={d} fill={C.accent}/>
+            <circle cx={cx} cy={cy} r="1.5" fill="#fff"/>
+          </g>;
         })}
       </svg>
       {tooltip && (
@@ -1466,11 +1470,15 @@ function App() {
                 <g key={b.id}>
                   <polyline points={polyline} fill="none" stroke={color} strokeWidth="2" strokeLinejoin="round" strokeLinecap="round" strokeDasharray={bi===0?"none":"4 2"}/>
                   {pts.map((p,i)=>{
-                    const star=(cx,cy,r)=>{const ir=r*0.25;return Array.from({length:4},(_,k)=>{const a1=-Math.PI/2+(k*Math.PI/2);const a2=-Math.PI/2+((k+0.5)*Math.PI/2);return `${cx+r*Math.cos(a1)},${cy+r*Math.sin(a1)} ${cx+ir*Math.cos(a2)},${cy+ir*Math.sin(a2)}`;}).join(' ');};
-                    return <polygon key={i} points={star(p.x,p.y,5)} fill={color} style={{cursor:"pointer"}}
+                    const cx=p.x,cy=p.y,w=3.4,h=4.5,nh=3.2;
+                    const d=`M${cx},${cy-h} C${cx+w},${cy-h} ${cx+w},${cy} ${cx},${cy} C${cx-w},${cy} ${cx-w},${cy-h} ${cx},${cy-h}Z M${cx},${cy} C${cx+w},${cy} ${cx+nh*0.7},${cy+nh} ${cx},${cy+nh*0.75} C${cx-nh*0.7},${cy+nh} ${cx-w},${cy} ${cx},${cy}Z`;
+                    return <g key={i} style={{cursor:"pointer"}}
                       onMouseEnter={()=>setTooltip({...p,bookTitle:b.title,color})}
                       onMouseLeave={()=>setTooltip(null)}
-                      onClick={()=>setTooltip(t=>t?.x===p.x&&t?.bookTitle===b.title?null:{...p,bookTitle:b.title,color})}/>;
+                      onClick={()=>setTooltip(t=>t?.x===p.x&&t?.bookTitle===b.title?null:{...p,bookTitle:b.title,color})}>
+                      <path d={d} fill={color}/>
+                      <circle cx={cx} cy={cy} r="1.3" fill="#fff"/>
+                    </g>;
                   })}
                 </g>
               );
