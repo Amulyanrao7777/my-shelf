@@ -98,6 +98,7 @@ const emptyBook = () => ({
   id: Date.now(), title: "", author: "", genre: "", status: "reading",
   seriesName: "", seriesNum: "",
   startDate: "",
+  finishedDate: "",
   // reads: array of read sessions, each with their own curve+pillars+vibe
   // reads[0] is always the "active" read being shown by default
   reads: [],
@@ -979,6 +980,7 @@ function App() {
             <Field label="#" value={draft.seriesNum} onChange={v=>setDraft(d=>({...d,seriesNum:v}))} placeholder="1" half/>
           </div>
           <Field label="Date started" type="date" value={draft.startDate||""} onChange={v=>setDraft(d=>({...d,startDate:v}))} placeholder=""/>
+          <Field label="Date finished" type="date" value={draft.finishedDate||""} onChange={v=>setDraft(d=>({...d,finishedDate:v}))} placeholder=""/>
           {/* Cover */}
           <div style={{ marginBottom:16 }}>
             <label style={lbl}>Cover photo</label>
@@ -1055,7 +1057,21 @@ function App() {
           )}
           <h2 className="serif" style={{ fontSize:24, color:C.text, margin:"0 0 4px", fontWeight:700 }}>{active.title}</h2>
           <div style={{ color:C.muted, fontSize:13, marginBottom:2 }}>{active.author}{active.genre?` · ${active.genre}`:""}</div>
-          {active.startDate && <div style={{ fontSize:11, color:C.muted, marginBottom:4 }}>started {active.startDate}</div>}
+{(()=>{
+            if (!active.startDate && !active.finishedDate) return null;
+            let line = "";
+            if (active.startDate) line += "started " + active.startDate;
+            if (active.finishedDate) {
+              if (line) line += " · ";
+              line += "finished " + active.finishedDate;
+              if (active.startDate) {
+                const ms = new Date(active.finishedDate) - new Date(active.startDate);
+                const days = Math.round(ms / (1000*60*60*24));
+                if (days > 0) line += " · read in " + days + " day" + (days===1?"":"s");
+              }
+            }
+            return <div style={{ fontSize:11, color:C.muted, marginBottom:4 }}>{line}</div>;
+          })()}
           {fs!==null && (
             <div style={{ marginTop:10 }}>
               <span className="serif" style={{ fontSize:44, fontWeight:700, color:C.accent, lineHeight:1 }}>{fs.toFixed(active.decimals||2)}</span>
@@ -1174,36 +1190,50 @@ function App() {
         }} style={ghostBtn(C.danger)}>remove book</button>
       </div>
 
-      {editShiftsOpen && (
+      {editShiftsOpen && (() => {
+        const curve = currentRead.curve||[];
+        const updateCurve = (newCurve) => {
+          if (reads) upd(active.id,b=>({...b,reads:b.reads.map((r,ri)=>ri===activeReadIdx?{...r,curve:newCurve}:r)}));
+          else upd(active.id,b=>({...b,curve:newCurve}));
+        };
+        let shiftDragIdx = null;
+        return (
         <Modal onClose={()=>setEditShiftsOpen(false)}>
-          <div style={{ fontWeight:700, fontSize:16, color:C.text, marginBottom:14, fontFamily:"'Playfair Display',serif" }}>edit shifts — {currentRead.label||"Read 1"}</div>
-          {!(currentRead.curve||[]).length && <div style={{ color:C.muted, fontSize:13 }}>No shifts logged yet.</div>}
-          {(currentRead.curve||[]).map((pt,i)=>(
-            <div key={i} style={{ padding:"10px 0", borderBottom:`1px solid ${C.border}` }}>
-              <div style={{ display:"flex", gap:8, marginBottom:6 }}>
-                <input value={pt.label} onChange={e=>{
-                  if (reads) upd(active.id,b=>({...b,reads:b.reads.map((r,ri)=>ri===activeReadIdx?{...r,curve:r.curve.map((c,j)=>j===i?{...c,label:e.target.value}:c)}:r)}));
-                  else upd(active.id,b=>({...b,curve:b.curve.map((c,j)=>j===i?{...c,label:e.target.value}:c)}));
-                }} placeholder="label" style={{ flex:2, padding:"6px 9px", borderRadius:6, border:`1px solid ${C.border}`, background:C.bg, color:C.text, fontSize:12, outline:"none" }}/>
-                <input type="number" min={1} max={10} value={pt.score} onChange={e=>{
-                  if (reads) upd(active.id,b=>({...b,reads:b.reads.map((r,ri)=>ri===activeReadIdx?{...r,curve:r.curve.map((c,j)=>j===i?{...c,score:parseFloat(e.target.value)||c.score}:c)}:r)}));
-                  else upd(active.id,b=>({...b,curve:b.curve.map((c,j)=>j===i?{...c,score:parseFloat(e.target.value)||c.score}:c)}));
-                }} style={{ flex:1, padding:"6px 9px", borderRadius:6, border:`1px solid ${C.border}`, background:C.bg, color:C.text, fontSize:12, outline:"none" }}/>
-                <button onClick={()=>{
-                  if (reads) upd(active.id,b=>({...b,reads:b.reads.map((r,ri)=>ri===activeReadIdx?{...r,curve:r.curve.filter((_,j)=>j!==i)}:r)}));
-                  else upd(active.id,b=>({...b,curve:b.curve.filter((_,j)=>j!==i)}));
-                }} style={{ background:"none", border:"none", color:C.amber, cursor:"pointer", fontSize:18, padding:0 }}>×</button>
+          <div style={{ fontWeight:700, fontSize:16, color:C.text, marginBottom:4, fontFamily:"'Playfair Display',serif" }}>edit shifts — {currentRead.label||"Read 1"}</div>
+          <div style={{ fontSize:11, color:C.muted, marginBottom:14 }}>drag ≡ to reorder</div>
+          {!curve.length && <div style={{ color:C.muted, fontSize:13 }}>No shifts logged yet.</div>}
+          {curve.map((pt,i)=>(
+            <div key={i} draggable
+              onDragStart={e=>{ shiftDragIdx=i; e.dataTransfer.effectAllowed="move"; }}
+              onDragOver={e=>e.preventDefault()}
+              onDrop={e=>{
+                e.preventDefault();
+                if (shiftDragIdx===null||shiftDragIdx===i) return;
+                const newCurve=[...curve];
+                const moved=newCurve.splice(shiftDragIdx,1)[0];
+                newCurve.splice(i,0,moved);
+                shiftDragIdx=null;
+                updateCurve(newCurve);
+              }}
+              style={{ padding:"10px 0", borderBottom:`1px solid ${C.border}`, cursor:"grab" }}>
+              <div style={{ display:"flex", gap:8, marginBottom:6, alignItems:"center" }}>
+                <span style={{ color:C.muted, fontSize:16, cursor:"grab", flexShrink:0, paddingRight:2 }}>≡</span>
+                <input value={pt.label} onChange={e=>{ const nc=[...curve]; nc[i]={...nc[i],label:e.target.value}; updateCurve(nc); }}
+                  placeholder="label" style={{ flex:2, padding:"6px 9px", borderRadius:6, border:`1px solid ${C.border}`, background:C.bg, color:C.text, fontSize:12, outline:"none" }}/>
+                <input type="number" min={1} max={10} value={pt.score} onChange={e=>{ const nc=[...curve]; nc[i]={...nc[i],score:parseFloat(e.target.value)||pt.score}; updateCurve(nc); }}
+                  style={{ flex:1, padding:"6px 9px", borderRadius:6, border:`1px solid ${C.border}`, background:C.bg, color:C.text, fontSize:12, outline:"none" }}/>
+                <button onClick={()=>updateCurve(curve.filter((_,j)=>j!==i))}
+                  style={{ background:"none", border:"none", color:C.amber, cursor:"pointer", fontSize:18, padding:0 }}>×</button>
               </div>
-              <input value={pt.note||""} onChange={e=>{
-                if (reads) upd(active.id,b=>({...b,reads:b.reads.map((r,ri)=>ri===activeReadIdx?{...r,curve:r.curve.map((c,j)=>j===i?{...c,note:e.target.value}:c)}:r)}));
-                else upd(active.id,b=>({...b,curve:b.curve.map((c,j)=>j===i?{...c,note:e.target.value}:c)}));
-              }} placeholder="note (e.g. the confession scene)"
+              <input value={pt.note||""} onChange={e=>{ const nc=[...curve]; nc[i]={...nc[i],note:e.target.value}; updateCurve(nc); }}
+                placeholder="note (e.g. the confession scene)"
                 style={{ width:"100%", padding:"6px 9px", borderRadius:6, border:`1px solid ${C.border}`, background:C.bg, color:C.text, fontSize:12, outline:"none", boxSizing:"border-box" }}/>
             </div>
           ))}
           <button onClick={()=>setEditShiftsOpen(false)} style={{ ...primaryBtn, marginTop:16 }}>done</button>
         </Modal>
-      )}
+        );
+      })()}
 
       {shareOpen && <ShareCard book={{ ...active, pillars: currentRead.pillars, vibe: currentRead.vibe }} onClose={()=>setShareOpen(false)}/>}
       {shareLinkBook && <ShareLinkModal book={shareLinkBook} onClose={()=>setShareLinkBook(null)}/>}
