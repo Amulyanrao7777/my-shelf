@@ -335,13 +335,10 @@ function CurveGraph({ curve }) {
         ))}
         <polyline points={polyline} fill="none" stroke={C.accent} strokeWidth="2.5" strokeLinejoin="round" strokeLinecap="round"/>
         {pts.map((p,i)=>(
-          <g key={i} transform={`translate(${p.x},${p.y})`} style={{ cursor:"pointer" }}
+          <rect key={i} x={p.x-4} y={p.y-4} width="8" height="8" fill={C.accent} style={{ cursor:"pointer" }}
             onMouseEnter={()=>setTooltip({...p,i})}
             onMouseLeave={()=>setTooltip(null)}
-            onClick={()=>setTooltip(t=>t?.i===i?null:{...p,i})}>
-            <path d="M0,-5.5 C3.8,-5.5 3.8,0 0,0 C-3.8,0 -3.8,-5.5 0,-5.5Z M0,0 C3.8,0 2.8,4.5 0,3.8 C-2.8,4.5 -3.8,0 0,0Z" fill={C.accent}/>
-            <circle cx="0" cy="0" r="1.5" fill="#fff"/>
-          </g>
+            onClick={()=>setTooltip(t=>t?.i===i?null:{...p,i})}/>
         ))}
       </svg>
       {tooltip && (
@@ -1468,13 +1465,10 @@ function App() {
                 <g key={b.id}>
                   <polyline points={polyline} fill="none" stroke={color} strokeWidth="2" strokeLinejoin="round" strokeLinecap="round" strokeDasharray={bi===0?"none":"4 2"}/>
                   {pts.map((p,i)=>(
-                    <g key={i} transform={`translate(${p.x},${p.y})`} style={{cursor:"pointer"}}
+                    <rect key={i} x={p.x-3.5} y={p.y-3.5} width="7" height="7" fill={color} style={{cursor:"pointer"}}
                       onMouseEnter={()=>setTooltip({...p,bookTitle:b.title,color})}
                       onMouseLeave={()=>setTooltip(null)}
-                      onClick={()=>setTooltip(t=>t?.x===p.x&&t?.bookTitle===b.title?null:{...p,bookTitle:b.title,color})}>
-                      <path d="M0,-5 C3.4,-5 3.4,0 0,0 C-3.4,0 -3.4,-5 0,-5Z M0,0 C3.4,0 2.5,4 0,3.4 C-2.5,4 -3.4,0 0,0Z" fill={color}/>
-                      <circle cx="0" cy="0" r="1.3" fill="#fff"/>
-                    </g>
+                      onClick={()=>setTooltip(t=>t?.x===p.x&&t?.bookTitle===b.title?null:{...p,bookTitle:b.title,color})}/>
                   ))}
                 </g>
               );
