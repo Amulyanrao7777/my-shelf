@@ -916,15 +916,17 @@ function App() {
               const isOver = dragOverIdx === idx;
               return (
                 <div key={b.id}
-                  draggable
-                  onDragStart={e=>{ e.currentTarget.style.cursor="grabbing"; handleDragStart(e,idx); }}
                   onDragOver={e=>handleDragOver(e,idx)}
                   onDrop={e=>handleDrop(e,idx)}
-                  onDragEnd={e=>{ e.currentTarget.style.cursor="default"; setDragIdx(null); setDragOverIdx(null); }}
+                  onDragEnd={()=>{ setDragIdx(null); setDragOverIdx(null); }}
                   style={{ ...sectionStyle, cursor:"default", position:"relative", overflow:"hidden", padding:"14px 12px", marginBottom:0,
                     opacity: isDragging ? 0.4 : 1,
                     boxShadow: isOver ? `0 0 0 2px ${C.accent}` : "none",
                     transition:"box-shadow 0.15s, opacity 0.15s" }}>
+                  {/* Invisible drag handle — left edge strip */}
+                  <div draggable
+                    onDragStart={e=>{ e.stopPropagation(); handleDragStart(e,idx); }}
+                    style={{ position:"absolute", left:0, top:0, width:10, height:"100%", cursor:"grab", zIndex:3 }}/>
                   {finished && <div style={{ position:"absolute", top:10, right:-18, width:80, textAlign:"center", background:C.accentL, color:C.white, fontSize:9, fontWeight:700, letterSpacing:"0.05em", padding:"3px 0", transform:"rotate(35deg)", zIndex:2 }}>READ</div>}
                   {b.reads && b.reads.length > 1 && (
                     <div style={{ position:"absolute", top:8, left:8, background:C.accent, color:C.white, fontSize:8, fontWeight:700, borderRadius:10, padding:"1px 6px", zIndex:2 }}>·{b.reads.length}×</div>
