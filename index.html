@@ -334,12 +334,13 @@ function CurveGraph({ curve }) {
           </text>
         ))}
         <polyline points={polyline} fill="none" stroke={C.accent} strokeWidth="2.5" strokeLinejoin="round" strokeLinecap="round"/>
-        {pts.map((p,i)=>(
-          <polygon key={i} points={`${p.x},${p.y-4} ${p.x+4},${p.y} ${p.x},${p.y+4} ${p.x-4},${p.y}`} fill={C.accent} style={{ cursor:"pointer" }}
+        {pts.map((p,i)=>{
+          const star=(cx,cy,r)=>{const ir=r*0.25;return Array.from({length:4},(_,k)=>{const a1=-Math.PI/2+(k*Math.PI/2);const a2=-Math.PI/2+((k+0.5)*Math.PI/2);return `${cx+r*Math.cos(a1)},${cy+r*Math.sin(a1)} ${cx+ir*Math.cos(a2)},${cy+ir*Math.sin(a2)}`;}).join(' ');};
+          return <polygon key={i} points={star(p.x,p.y,6)} fill={C.accent} style={{ cursor:"pointer" }}
             onMouseEnter={()=>setTooltip({...p,i})}
             onMouseLeave={()=>setTooltip(null)}
-            onClick={()=>setTooltip(t=>t?.i===i?null:{...p,i})}/>
-        ))}
+            onClick={()=>setTooltip(t=>t?.i===i?null:{...p,i})}/>;
+        })}
       </svg>
       {tooltip && (
         <div style={{ position:"absolute", top:0, left:"50%", transform:"translateX(-50%)", background:C.bg, border:`1px solid ${C.border}`, borderRadius:8, padding:"8px 12px", fontSize:12, color:C.text, pointerEvents:"none", zIndex:10, whiteSpace:"nowrap", boxShadow:"0 2px 12px rgba(0,0,0,0.1)" }}>
@@ -568,6 +569,90 @@ function SharePage({ data }) {
   );
 }
 
+// ─── SHELF VIEW PAGE (read-only, shown when ?shelf= is in URL) ───────────────
+function ShelfViewPage({ books }) {
+  const statuses = ["reading", "finished", "want to read", "dropped"];
+  const grouped = {};
+  statuses.forEach(s => { grouped[s] = books.filter(b => b.status === s); });
+
+  return (
+    <div style={{ minHeight:"100vh", background:C.bg, padding:"28px 18px" }}>
+      <div style={{ maxWidth:520, margin:"0 auto" }}>
+        <div style={{ display:"flex", alignItems:"center", gap:10, marginBottom:6 }}>
+          <Logo size={30}/>
+          <h1 className="serif" style={{ fontSize:24, color:C.text, margin:0, fontWeight:700 }}>my shelf</h1>
+        </div>
+        <div style={{ fontSize:12, color:C.muted, marginBottom:24, fontStyle:"italic" }}>shared · view only</div>
+
+        {statuses.map(status => {
+          const group = grouped[status];
+          if (!group || !group.length) return null;
+          return (
+            <div key={status} style={{ marginBottom:24 }}>
+              <div style={{ fontSize:11, color:C.muted, letterSpacing:"0.08em", textTransform:"uppercase", marginBottom:10, fontWeight:600 }}>{status}</div>
+              <div style={{ display:"flex", flexDirection:"column", gap:8 }}>
+                {group.map((b, i) => (
+                  <div key={i} style={{ background:C.warm, border:`1px solid ${C.border}`, borderRadius:10, padding:"12px 14px", display:"flex", justifyContent:"space-between", alignItems:"center" }}>
+                    <div>
+                      <div className="serif" style={{ fontSize:14, fontWeight:700, color:C.text, marginBottom:2 }}>{b.title}</div>
+                      <div style={{ fontSize:12, color:C.muted }}>{b.author}{b.genre ? ` · ${b.genre}` : ""}</div>
+                      {b.seriesName && <div style={{ fontSize:10, color:C.accentL, marginTop:2 }}>{b.seriesName}{b.seriesNum ? ` #${b.seriesNum}` : ""}</div>}
+                    </div>
+                    {b.score !== null && b.score !== undefined && (
+                      <span className="serif" style={{ fontSize:20, fontWeight:700, color:C.accent, flexShrink:0, marginLeft:12 }}>{Number(b.score).toFixed(b.decimals||2)}</span>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+          );
+        })}
+
+        <div style={{ fontSize:11, color:C.muted, textAlign:"center", marginTop:16, fontStyle:"italic" }}>shared from my shelf ✦</div>
+      </div>
+    </div>
+  );
+}
+
+// ─── SHELF SHARE LINK MODAL ──────────────────────────────────────────────────
+function ShelfShareLinkModal({ books, onClose }) {
+  const [copied, setCopied] = useState(false);
+
+  const shelfData = books.map(b => {
+    const read = getActiveRead(b);
+    return {
+      title: b.title, author: b.author, genre: b.genre,
+      seriesName: b.seriesName, seriesNum: b.seriesNum,
+      status: b.status, cover: null,
+      score: finalScoreForRead(read),
+      decimals: b.decimals || 2,
+    };
+  });
+
+  const encoded = btoa(unescape(encodeURIComponent(JSON.stringify(shelfData))));
+  const url = window.location.href.split('?')[0] + '?shelf=' + encoded;
+
+  const copy = () => {
+    navigator.clipboard.writeText(url).then(() => { setCopied(true); setTimeout(() => setCopied(false), 2000); }).catch(() => {});
+  };
+
+  return (
+    <Modal onClose={onClose}>
+      <div style={{ fontFamily:"'Playfair Display',serif", fontSize:18, fontWeight:700, color:C.text, marginBottom:6 }}>share your shelf</div>
+      <div style={{ fontSize:12, color:C.muted, marginBottom:16, lineHeight:1.6 }}>
+        Anyone with this link can view a read-only snapshot of your entire shelf — titles, authors, statuses, and scores. No account needed.
+      </div>
+      <div style={{ background:C.warm, border:`1px solid ${C.border}`, borderRadius:8, padding:"10px 12px", fontSize:11, color:C.muted, wordBreak:"break-all", marginBottom:14, lineHeight:1.5 }}>
+        {url}
+      </div>
+      <button onClick={copy} style={primaryBtn}>{copied ? "copied ✓" : "copy link"}</button>
+      <div style={{ marginTop:8 }}>
+        <button onClick={onClose} style={{ ...ghostBtn(C.muted), fontSize:12 }}>close</button>
+      </div>
+    </Modal>
+  );
+}
+
 function App() {
   // Check if this is a share link view
   const urlParams = new URLSearchParams(window.location.search);
@@ -578,6 +663,16 @@ function App() {
       return <SharePage data={data}/>;
     } catch(e) {
       // invalid share param, fall through to normal app
+    }
+  }
+
+  const shelfParam = urlParams.get("shelf");
+  if (shelfParam) {
+    try {
+      const shelfData = JSON.parse(decodeURIComponent(escape(atob(shelfParam))));
+      return <ShelfViewPage books={shelfData}/>;
+    } catch(e) {
+      // invalid shelf param, fall through to normal app
     }
   }
 
@@ -603,6 +698,7 @@ function App() {
   const [syncStatus, setSyncStatus] = useState(null);
   const [search, setSearch] = useState("");
   const [shareLinkBook, setShareLinkBook] = useState(null); // book being shared as link
+  const [shelfShareLinkOpen, setShelfShareLinkOpen] = useState(false);
   const [dragOrder, setDragOrder] = useState(null); // custom order array of book ids
   const [dragIdx, setDragIdx] = useState(null);
   const [dragOverIdx, setDragOverIdx] = useState(null);
@@ -847,6 +943,10 @@ function App() {
                     style={{ display:"block", width:"100%", textAlign:"left", background:"none", border:"none", color:syncConfig?C.accent:C.text, fontSize:13, padding:"7px 12px", cursor:"pointer", borderRadius:6, fontWeight:syncConfig?600:400 }}>
                     {syncConfig?"✦ sync connected":"set up sync"}
                   </button>
+                  <button onClick={()=>{ setShelfShareLinkOpen(true); setMenuOpen(false); }}
+                    style={{ display:"block", width:"100%", textAlign:"left", background:"none", border:"none", color:C.text, fontSize:13, padding:"7px 12px", cursor:"pointer", borderRadius:6 }}>
+                    ↗ share shelf (view-only)
+                  </button>
                 </div>
               )}
             </div>
@@ -960,6 +1060,7 @@ function App() {
       </div>
       {syncSetupOpen && <SyncSetup existing={syncConfig} onSave={cfg=>{ saveSyncConfig(cfg); setSyncConfig(cfg); setSyncSetupOpen(false); }} onClose={()=>setSyncSetupOpen(false)}/>}
       {shareLinkBook && <ShareLinkModal book={shareLinkBook} onClose={()=>setShareLinkBook(null)}/>}
+      {shelfShareLinkOpen && <ShelfShareLinkModal books={books} onClose={()=>setShelfShareLinkOpen(false)}/>}
     </div>
   );
   }
@@ -1464,12 +1565,13 @@ function App() {
               return (
                 <g key={b.id}>
                   <polyline points={polyline} fill="none" stroke={color} strokeWidth="2" strokeLinejoin="round" strokeLinecap="round" strokeDasharray={bi===0?"none":"4 2"}/>
-                  {pts.map((p,i)=>(
-                    <polygon key={i} points={`${p.x},${p.y-4} ${p.x+4},${p.y} ${p.x},${p.y+4} ${p.x-4},${p.y}`} fill={color} style={{cursor:"pointer"}}
+                  {pts.map((p,i)=>{
+                    const star=(cx,cy,r)=>{const ir=r*0.25;return Array.from({length:4},(_,k)=>{const a1=-Math.PI/2+(k*Math.PI/2);const a2=-Math.PI/2+((k+0.5)*Math.PI/2);return `${cx+r*Math.cos(a1)},${cy+r*Math.sin(a1)} ${cx+ir*Math.cos(a2)},${cy+ir*Math.sin(a2)}`;}).join(' ');};
+                    return <polygon key={i} points={star(p.x,p.y,5)} fill={color} style={{cursor:"pointer"}}
                       onMouseEnter={()=>setTooltip({...p,bookTitle:b.title,color})}
                       onMouseLeave={()=>setTooltip(null)}
-                      onClick={()=>setTooltip(t=>t?.x===p.x&&t?.bookTitle===b.title?null:{...p,bookTitle:b.title,color})}/>
-                  ))}
+                      onClick={()=>setTooltip(t=>t?.x===p.x&&t?.bookTitle===b.title?null:{...p,bookTitle:b.title,color})}/>;
+                  })}
                 </g>
               );
             })}
