@@ -917,11 +917,11 @@ function App() {
               return (
                 <div key={b.id}
                   draggable
-                  onDragStart={e=>handleDragStart(e,idx)}
+                  onDragStart={e=>{ e.currentTarget.style.cursor="grabbing"; handleDragStart(e,idx); }}
                   onDragOver={e=>handleDragOver(e,idx)}
                   onDrop={e=>handleDrop(e,idx)}
-                  onDragEnd={()=>{ setDragIdx(null); setDragOverIdx(null); }}
-                  style={{ ...sectionStyle, cursor:"grab", position:"relative", overflow:"hidden", padding:"14px 12px", marginBottom:0,
+                  onDragEnd={e=>{ e.currentTarget.style.cursor="default"; setDragIdx(null); setDragOverIdx(null); }}
+                  style={{ ...sectionStyle, cursor:"default", position:"relative", overflow:"hidden", padding:"14px 12px", marginBottom:0,
                     opacity: isDragging ? 0.4 : 1,
                     boxShadow: isOver ? `0 0 0 2px ${C.accent}` : "none",
                     transition:"box-shadow 0.15s, opacity 0.15s" }}>
