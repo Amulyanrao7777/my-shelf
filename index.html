@@ -1217,7 +1217,7 @@ function App() {
               }}
               style={{ padding:"10px 0", borderBottom:`1px solid ${C.border}`, cursor:"grab" }}>
               <div style={{ display:"flex", gap:8, marginBottom:6, alignItems:"center" }}>
-                <span style={{ color:C.muted, fontSize:16, cursor:"grab", flexShrink:0, paddingRight:2 }}>≡</span>
+                <span style={{ color:C.accentL, fontSize:20, cursor:"grab", flexShrink:0, padding:"0 6px 0 2px", lineHeight:1, userSelect:"none" }}>⠿</span>
                 <input value={pt.label} onChange={e=>{ const nc=[...curve]; nc[i]={...nc[i],label:e.target.value}; updateCurve(nc); }}
                   placeholder="label" style={{ flex:2, padding:"6px 9px", borderRadius:6, border:`1px solid ${C.border}`, background:C.bg, color:C.text, fontSize:12, outline:"none" }}/>
                 <input type="number" min={1} max={10} value={pt.score} onChange={e=>{ const nc=[...curve]; nc[i]={...nc[i],score:parseFloat(e.target.value)||pt.score}; updateCurve(nc); }}
@@ -1270,10 +1270,10 @@ function App() {
       for (let i = 0; i < sorted.length-1; i++) {
         const a=sorted[i], b=sorted[i+1];
         const steps=Math.round(b.chNum-a.chNum);
+        // Hold the previous anchor's score until the next anchor (step curve)
         for (let s=1; s<steps; s++) {
-          const ch=a.chNum+s, t=s/steps;
-          const sc=parseFloat((a.score+t*(b.score-a.score)).toFixed(2));
-          result.push({label:`Ch ${ch}`,score:sc,note:"",interpolated:true});
+          const ch=a.chNum+s;
+          result.push({label:String(ch),score:a.score,note:"",interpolated:true});
         }
       }
       return result;
@@ -1292,7 +1292,11 @@ function App() {
       const newAnchor = {label,score,note:logDraft.note,anchor:isChapterPoint};
 
       const buildNewCurve = (existingCurve) => {
-        const withNew = [...existingCurve, newAnchor];
+        // Clean up anchor label — just the number, not "Ch 8"
+        const cleanedAnchor = isChapterPoint
+          ? {...newAnchor, label: String(newChNum % 1 === 0 ? Math.round(newChNum) : newChNum)}
+          : newAnchor;
+        const withNew = [...existingCurve, cleanedAnchor];
         if (!isChapterPoint) return withNew;
         const anchors = withNew
           .filter(pt=>{ const cn=extractChNum(pt.label); return cn!==null&&!pt.interpolated; })
