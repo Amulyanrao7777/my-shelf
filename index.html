@@ -1197,7 +1197,7 @@ function App() {
                 if (ev.target && ev.target.result) {
                   // Guard against huge covers crashing localStorage
                   if (ev.target.result.length > 2*1024*1024) {
-                    showBanner("⚠ cover image too large (max ~1.5MB) — try a smaller image", 4000);
+                    console.warn("cover image too large");
                     return;
                   }
                   setDraft(d=>({...d,cover:ev.target.result}));
