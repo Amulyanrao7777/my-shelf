@@ -32,6 +32,9 @@
   .book-grid { display: grid; grid-template-columns: repeat(var(--cols), 1fr); gap: 14px; }
   .page-wrap { max-width: var(--max-w); margin: 0 auto; padding: 28px 18px; }
 
+  @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+  .sync-cloud-spinning { animation: spin 1s linear infinite; transform-origin: center; }
+
   /* Sync banner */
   #sync-banner {
     position: fixed; top: 0; left: 0; right: 0;
@@ -88,56 +91,58 @@ const SYNC_KEY = "myshelf_sync_config";
 // ─── LOCAL STORAGE ────────────────────────────────────────────────────────────
 const load   = () => {
   try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (!raw) return [];
-    const d = JSON.parse(raw);
-    if (!Array.isArray(d)) { console.warn("shelf data corrupt, resetting"); return []; }
-    return d.filter(b => b && typeof b === 'object' && b.id);
-  } catch(e) { console.error("load() failed:", e); return []; }
+    const d = JSON.parse(localStorage.getItem(STORAGE_KEY));
+    if (!Array.isArray(d)) return [];
+    // Deduplicate by id — last write wins (most recently updated)
+    const map = {};
+    d.forEach(b => {
+      if (!b || b.id === undefined) return;
+      const existing = map[b.id];
+      if (!existing || (b.updatedAt || 0) >= (existing.updatedAt || 0)) map[b.id] = b;
+    });
+    return Object.values(map);
+  } catch { return []; }
 };
-const loadSV = () => { try { return JSON.parse(localStorage.getItem(SERIES_VIBE_KEY)) || {}; } catch { return {}; } };
+const loadSV = () => { try { const d = JSON.parse(localStorage.getItem(SERIES_VIBE_KEY)); return (d && typeof d==="object") ? d : {}; } catch { return {}; } };
 const save   = (b)  => {
-  if (!Array.isArray(b)) { console.error("save() rejected non-array"); return false; }
+  if (!Array.isArray(b)) { console.error("save() rejected: not an array", b); return false; }
   try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(b));
+    const str = JSON.stringify(b);
+    localStorage.setItem(STORAGE_KEY, str);
+    const verify = localStorage.getItem(STORAGE_KEY);
+    if (verify !== str) { console.error("save() verify failed — localStorage may be full"); return "quota"; }
     return true;
   } catch(e) {
     console.error("save() failed:", e);
-    if (e.name === "QuotaExceededError" || e.name === "NS_ERROR_DOM_QUOTA_REACHED") {
-      try {
-        const slim = b.map(bk => ({...bk, cover: null}));
-        localStorage.setItem(STORAGE_KEY, JSON.stringify(slim));
-        if (typeof showBanner === 'function') showBanner("⚠ storage full — covers removed", 4000);
-        return true;
-      } catch(e2) { if (typeof showBanner === 'function') showBanner("⚠ storage full — data may not save", 5000); }
-    }
+    if (e.name === "QuotaExceededError" || e.name === "NS_ERROR_DOM_QUOTA_REACHED") return "quota";
     return false;
   }
 };
 const saveSV = (sv) => {
-  if (!sv || typeof sv !== "object" || Array.isArray(sv)) { console.error("saveSV() rejected:", sv); return false; }
-  try { localStorage.setItem(SERIES_VIBE_KEY, JSON.stringify(sv)); return true; }
-  catch(e) { console.error("saveSV() failed:", e); return false; }
+  if (!sv || typeof sv !== "object") { console.error("saveSV() rejected: not an object", sv); return false; }
+  try { localStorage.setItem(SERIES_VIBE_KEY, JSON.stringify(sv)); return true; } catch(e) { console.error("saveSV() failed:", e); return false; }
 };
 const loadSyncConfig = () => { try { return JSON.parse(localStorage.getItem(SYNC_KEY)) || null; } catch { return null; } };
 const saveSyncConfig = (c) => { try { localStorage.setItem(SYNC_KEY, JSON.stringify(c)); } catch {} };
 
 // ─── HELPERS ──────────────────────────────────────────────────────────────────
 const emptyBook = () => ({
-  id: Date.now() + Math.floor(Math.random()*10000), // avoid id collision on fast adds
-  title: "", author: "", genre: "", status: "reading",
+  id: Date.now(), title: "", author: "", genre: "", status: "reading",
   seriesName: "", seriesNum: "",
   startDate: "",
   finishedDate: "",
+  // reads: array of read sessions, each with their own curve+pillars+vibe
+  // reads[0] is always the "active" read being shown by default
   reads: [],
   activeReadIdx: 0,
+  // legacy flat fields kept for backwards compat, used when reads[] is empty
   curve: [], pillars: { feeling:"", writing:"", imprint:"", pacing:"", characters:"" },
   characterRatings: [], vibe: "", decimals: 2, cover: null, bookNotes: "",
   updatedAt: Date.now(),
 });
 
 const emptyRead = (label) => ({
-  id: Date.now() + Math.random(),
+  id: Date.now().toString(36) + "-" + Math.random().toString(36).slice(2),
   label: label || "Read 1",
   startDate: new Date().toISOString().slice(0,10),
   curve: [],
@@ -147,39 +152,36 @@ const emptyRead = (label) => ({
 
 // Get the active read data for a book (falls back to legacy flat fields)
 const getActiveRead = (b) => {
-  if (!b) return { id:"legacy", label:"Read 1", curve:[], pillars:{feeling:"",writing:"",imprint:"",pacing:"",characters:""}, vibe:"" };
-  if (b.reads && Array.isArray(b.reads) && b.reads.length > 0) {
-    const idx = Math.min(Math.max(0, b.activeReadIdx || 0), b.reads.length - 1);
-    return b.reads[idx] || b.reads[0];
+  if (b.reads && b.reads.length > 0) {
+    const rawIdx = parseInt(b.activeReadIdx, 10);
+    const idx = Math.max(0, Math.min(isNaN(rawIdx) ? 0 : rawIdx, b.reads.length - 1));
+    return b.reads[idx];
   }
-  return { id:"legacy", label:"Read 1", curve: Array.isArray(b.curve)?b.curve:[], pillars: b.pillars||{feeling:"",writing:"",imprint:"",pacing:"",characters:""}, vibe: b.vibe||"" };
+  // legacy: wrap flat fields as a read object
+  return { id: "legacy", label: "Read 1", curve: b.curve||[], pillars: b.pillars||{feeling:"",writing:"",imprint:"",pacing:"",characters:""}, vibe: b.vibe||"" };
 };
 
 // finalScore using active read
 const finalScoreForRead = (read) => {
   if (!read) return null;
-  try {
-    const pillars = read.pillars || {};
-    const vals = PILLARS.map(p => parseFloat(pillars[p.key])).filter(v => !isNaN(v) && isFinite(v));
-    const pa = vals.length ? vals.reduce((a,c)=>a+c,0)/vals.length : null;
-    const vibe = parseFloat(read.vibe);
-    if (pa===null && isNaN(vibe)) return null;
-    if (pa===null) return Math.min(5, Math.max(1, vibe));
-    if (isNaN(vibe)) return Math.min(5, Math.max(1, pa));
-    return Math.min(5, Math.max(1, (pa+vibe)/2));
-  } catch(e) { return null; }
+  const pillars = (read.pillars && typeof read.pillars === "object") ? read.pillars : {};
+  const vals = PILLARS.map(p => parseFloat(pillars[p.key])).filter(v => !isNaN(v) && v >= 1);
+  const pa = vals.length ? vals.reduce((a,c)=>a+c,0)/vals.length : null;
+  const vibe = parseFloat(read.vibe);
+  const vibeValid = !isNaN(vibe) && vibe >= 1;
+  if (pa===null && !vibeValid) return null;
+  if (pa===null) return vibe;
+  if (!vibeValid) return pa;
+  return Math.min(5, Math.max(1, (pa+vibe)/2));
 };
 
-const clampNum = (v, min, max) => { const n = parseFloat(v); return isNaN(n) ? v : Math.min(max, Math.max(min, n)); };
+const clampNum = (v, min, max) => { const n = parseFloat(v); return isNaN(n) ? NaN : Math.min(max, Math.max(min, n)); };
 
 const avgPillars = (b) => {
-  if (!b) return null;
-  try {
-    const read = getActiveRead(b);
-    const pillars = (read && read.pillars) ? read.pillars : (b.pillars || {});
-    const vals = PILLARS.map(p => parseFloat(pillars[p.key])).filter(v => !isNaN(v) && isFinite(v));
-    return vals.length ? vals.reduce((a,c)=>a+c,0)/vals.length : null;
-  } catch(e) { return null; }
+  let read;
+  try { read = getActiveRead(b); } catch(e) { read = b; }
+  const vals = PILLARS.map(p => parseFloat(((read && read.pillars)||b.pillars||{})[p.key])).filter(v => !isNaN(v));
+  return vals.length ? vals.reduce((a,c)=>a+c,0)/vals.length : null;
 };
 
 const finalScore = (b) => {
@@ -187,38 +189,111 @@ const finalScore = (b) => {
   return finalScoreForRead(read);
 };
 
+// ─── COMPRESSION HELPERS ─────────────────────────────────────────────────────
+// Uses CompressionStream (built-in, no deps) to shrink JSON before upload.
+// Falls back to plain JSON if not supported.
+const compressStr = async (str) => {
+  try {
+    if (typeof CompressionStream === "undefined") return { data: str, compressed: false };
+    const stream = new CompressionStream("gzip");
+    const writer = stream.writable.getWriter();
+    const encoder = new TextEncoder();
+    writer.write(encoder.encode(str));
+    writer.close();
+    const chunks = [];
+    const reader = stream.readable.getReader();
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      chunks.push(value);
+    }
+    const total = chunks.reduce((a, c) => a + c.length, 0);
+    const merged = new Uint8Array(total);
+    let offset = 0;
+    chunks.forEach(c => { merged.set(c, offset); offset += c.length; });
+    // base64 encode
+    let binary = "";
+    merged.forEach(b => binary += String.fromCharCode(b));
+    return { data: btoa(binary), compressed: true };
+  } catch(e) {
+    return { data: str, compressed: false };
+  }
+};
+
+const decompressStr = async (data, compressed) => {
+  if (!compressed) return data;
+  try {
+    const binary = atob(data);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+    const stream = new DecompressionStream("gzip");
+    const writer = stream.writable.getWriter();
+    writer.write(bytes);
+    writer.close();
+    const chunks = [];
+    const reader = stream.readable.getReader();
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      chunks.push(value);
+    }
+    const total = chunks.reduce((a, c) => a + c.length, 0);
+    const merged = new Uint8Array(total);
+    let offset = 0;
+    chunks.forEach(c => { merged.set(c, offset); offset += c.length; });
+    return new TextDecoder().decode(merged);
+  } catch(e) {
+    return data; // fallback: return as-is
+  }
+};
+
 // ─── SUPABASE SYNC ────────────────────────────────────────────────────────────
 // Uses Supabase REST API directly — no library needed.
 // User provides their Supabase URL + anon key + a unique user ID.
 const supabaseFetch = async (url, anonKey, path, method="GET", body=null) => {
-  const opts = {
-    method,
-    headers: {
-      "apikey": anonKey,
-      "Authorization": `Bearer ${anonKey}`,
-      "Content-Type": "application/json",
-      "Prefer": method==="POST" ? "resolution=merge-duplicates,return=representation" : "return=representation",
-    },
+  const headers = {
+    "apikey": anonKey,
+    "Authorization": `Bearer ${anonKey}`,
+    "Content-Type": "application/json",
   };
+  // Only add Prefer header for non-GET requests
+  if (method !== "GET") headers["Prefer"] = "resolution=merge-duplicates,return=minimal";
+  const opts = { method, headers };
   if (body) opts.body = JSON.stringify(body);
   const res = await fetch(`${url}/rest/v1${path}`, opts);
   if (!res.ok) { const t = await res.text(); throw new Error(t); }
-  return res.status === 204 ? null : res.json();
+  if (res.status === 204) return null;
+  const text = await res.text();
+  if (!text || text === "") return null;
+  try { return JSON.parse(text); } catch(e) { throw new Error("Bad JSON from server: " + text.slice(0,100)); }
 };
 
 const syncToCloud = async (cfg, books, seriesVibes) => {
   const { url, anonKey, userId } = cfg;
-  if (!url || !anonKey || !userId) throw new Error("syncToCloud: missing config");
-  if (!Array.isArray(books) || books.length === 0) throw new Error("syncToCloud: refusing to push empty/invalid books");
-  // Strip covers from sync to keep payload small
-  const booksForSync = books.map(b => ({...b, cover: null}));
+  if (!books || !Array.isArray(books)) throw new Error("syncToCloud: books is not an array");
+  if (books.length === 0) throw new Error("syncToCloud: refusing to push empty books array");
+  const validBooks = books.filter(b => b && b.id !== undefined && b.id !== null);
+  if (validBooks.length !== books.length) {
+    console.warn("syncToCloud: filtered", books.length - validBooks.length, "books with missing ids");
+  }
+  books = validBooks;
+  if (!userId || !url || !anonKey) throw new Error("syncToCloud: missing config");
+  const booksStr = JSON.stringify(books);
+  const seriesStr = JSON.stringify(seriesVibes || {});
+  try { JSON.parse(booksStr); } catch(e) { throw new Error("syncToCloud: books JSON invalid"); }
+  // Compress to stay well under Supabase row limits
+  const [booksCompressed, seriesCompressed] = await Promise.all([
+    compressStr(booksStr),
+    compressStr(seriesStr),
+  ]);
   const payload = {
     user_id: userId,
-    books_json: JSON.stringify(booksForSync),
-    series_json: JSON.stringify(seriesVibes||{}),
+    books_json: booksCompressed.data,
+    series_json: seriesCompressed.data,
+    books_compressed: booksCompressed.compressed,
+    series_compressed: seriesCompressed.compressed,
     updated_at: new Date().toISOString(),
   };
-  // Upsert: POST with merge-duplicates — works whether row exists or not
   const res = await fetch(`${url}/rest/v1/shelf_data2`, {
     method: "POST",
     headers: {
@@ -229,18 +304,54 @@ const syncToCloud = async (cfg, books, seriesVibes) => {
     },
     body: JSON.stringify(payload),
   });
-  if (!res.ok) { const t = await res.text(); throw new Error(t); }
+  if (!res.ok) { const t = await res.text(); throw new Error(`Supabase error: ${res.status} ${t}`); }
 };
 
 const syncFromCloud = async (cfg) => {
   const { url, anonKey, userId } = cfg;
-  const data = await supabaseFetch(url, anonKey, `/shelf_data2?user_id=eq.${userId}&select=books_json,series_json,updated_at`);
+  const data = await supabaseFetch(url, anonKey, `/shelf_data2?user_id=eq.${encodeURIComponent(userId)}&select=books_json,series_json,books_compressed,series_compressed,updated_at`);
   if (!data || !data.length) return null;
-  return {
-    books: JSON.parse(data[0].books_json || "[]"),
-    seriesVibes: JSON.parse(data[0].series_json || "{}"),
-    updatedAt: data[0].updated_at,
-  };
+  const row = data[0];
+  let books = [], seriesVibes = {};
+  try {
+    const rawBooks = await decompressStr(row.books_json || "[]", row.books_compressed || false);
+    const b = JSON.parse(rawBooks);
+    books = Array.isArray(b) ? b : [];
+  } catch(e) { console.error("books_json parse error:", e); }
+  try {
+    const rawSeries = await decompressStr(row.series_json || "{}", row.series_compressed || false);
+    const s = JSON.parse(rawSeries);
+    seriesVibes = (s && typeof s === "object") ? s : {};
+  } catch(e) { console.error("series_json parse error:", e); }
+  return { books, seriesVibes, updatedAt: row.updated_at };
+};
+
+// ─── SAFE MERGE ───────────────────────────────────────────────────────────────
+// Takes local and remote book arrays. Returns merged array where:
+// - Every book from EITHER side is included (never dropped)
+// - For books on both sides, the one with newer updatedAt wins
+// - If updatedAt is equal or missing, remote wins (cloud is source of truth)
+const mergeBooks = (local, remote) => {
+  if (!Array.isArray(local)) local = [];
+  if (!Array.isArray(remote)) remote = [];
+  const map = {};
+  // Add all local books first
+  local.forEach(b => { if (b && b.id !== undefined && b.id !== null) map[b.id] = b; });
+  // Merge remote — remote wins if newer or equal updatedAt
+  remote.forEach(b => {
+    if (!b || b.id === undefined || b.id === null) return;
+    const l = map[b.id];
+    if (!l || (b.updatedAt||0) >= (l.updatedAt||0)) {
+      map[b.id] = b;
+    }
+  });
+  return Object.values(map);
+};
+
+const mergeSeries = (local, remote) => {
+  if (!local || typeof local !== "object") local = {};
+  if (!remote || typeof remote !== "object") remote = {};
+  return { ...local, ...remote }; // remote wins for series vibes
 };
 
 // ─── STYLES ───────────────────────────────────────────────────────────────────
@@ -321,7 +432,7 @@ function ScoreField({ label, prompt, value, onChange, max=5, decimals=2 }) {
       <div style={{ display:"flex", alignItems:"center", gap:10 }}>
         <input type="number" min={1} max={max} step={decimals===3?0.001:0.01} value={value}
           onChange={e=>onChange(e.target.value)}
-          onBlur={e=>{ const v=clampNum(e.target.value,1,max); if(!isNaN(parseFloat(v))) onChange(parseFloat(v).toFixed(decimals)); }}
+          onBlur={e=>{ const v=clampNum(e.target.value,1,max); if(!isNaN(v)) onChange(parseFloat(v).toFixed(decimals)); }}
           placeholder={`1–${max}`}
           style={{ width:90, padding:"7px 10px", borderRadius:7, border:`1px solid ${C.border}`, background:C.bg, color:C.text, fontSize:14, outline:"none" }}/>
         <span style={{ fontSize:12, color:C.muted }}>out of {max}</span>
@@ -332,8 +443,10 @@ function ScoreField({ label, prompt, value, onChange, max=5, decimals=2 }) {
 
 function MiniCurve({ curve }) {
   if (!curve || !curve.length) return null;
-  const W=300, H=44, pad=4, n=curve.length;
-  const pts = curve.map((pt,i)=>{
+  const safeCurve = curve.filter(pt => pt && !isNaN(parseFloat(pt.score)));
+  if (!safeCurve.length) return null;
+  const W=300, H=44, pad=4, n=safeCurve.length;
+  const pts = safeCurve.map((pt,i)=>{
     const x = pad+(n===1?(W-pad*2)/2:(i/(n-1))*(W-pad*2));
     const y = H-pad-((pt.score-1)/(10-1))*(H-pad*2);
     return `${x},${y}`;
@@ -347,12 +460,13 @@ function MiniCurve({ curve }) {
 
 function CurveGraph({ curve }) {
   const [tooltip, setTooltip] = useState(null);
-  if (!curve || !curve.length) return <div style={{ color:C.muted, fontSize:13, textAlign:"center", padding:"20px 0" }}>No shifts logged yet.</div>;
+  const safeCurve = curve.filter(pt => pt && typeof pt === "object" && !isNaN(parseFloat(pt.score)));
+  if (!safeCurve.length) return <div style={{ color:C.muted, fontSize:13, textAlign:"center", padding:"20px 0" }}>No shifts logged yet.</div>;
   const W=500, H=180, pL=30, pR=14, pT=10, pB=32;
-  const plotW=W-pL-pR, plotH=H-pT-pB, n=curve.length;
-  const pts=curve.map((pt,i)=>({
+  const plotW=W-pL-pR, plotH=H-pT-pB, n=safeCurve.length;
+  const pts=safeCurve.map((pt,i)=>({
     x: pL+(n===1?plotW/2:(i/(n-1))*plotW),
-    y: pT+(1-(pt.score-1)/(10-1))*plotH,
+    y: pT+(1-(Math.min(10,Math.max(1,pt.score))-1)/(10-1))*plotH,
     ...pt, label: pt.label||`#${i+1}`
   }));
   const polyline=pts.map(p=>`${p.x},${p.y}`).join(' ');
@@ -392,7 +506,8 @@ function CurveGraph({ curve }) {
 }
 
 function RadarDisplay({ book }) {
-  const data = PILLARS.map(p=>({ label:p.label, value:parseFloat((book.pillars||{})[p.key])||0 }));
+  const pillars = (book && book.pillars) ? book.pillars : {};
+  const data = PILLARS.map(p=>({ label:p.label, value:parseFloat(pillars[p.key])||0 }));
   if (!data.some(d=>d.value>0)) return <div style={{ color:C.muted, fontSize:13, textAlign:"center", padding:"20px 0" }}>Rate pillars to see radar.</div>;
   const cx=150, cy=115, r=75, n=data.length, off=-Math.PI/2;
   const ang=i=>off+(i/n)*2*Math.PI;
@@ -427,7 +542,6 @@ function Modal({ children, onClose }) {
 // ─── SHARE CARD ───────────────────────────────────────────────────────────────
 // Rendered inline (no modal) to avoid the white-screen routing bug.
 function ShareCard({ book, onClose }) {
-  if (!book) return null;
   const fs = finalScore(book);
   const radarData = PILLARS.map(p=>({ label:p.label, value:parseFloat((book.pillars||{})[p.key])||0 }));
   const hasRadar = radarData.some(d=>d.value>0);
@@ -464,7 +578,7 @@ function ShareCard({ book, onClose }) {
 
         {/* Pillar scores */}
         <div style={{ borderTop:`1px solid ${C.border}`, paddingTop:12, marginBottom:12 }}>
-          {PILLARS.map(p=>{ const v=parseFloat((book.pillars||{})[p.key]); return (
+          {PILLARS.map(p=>{ const v=parseFloat(book.pillars[p.key]); return (
             <div key={p.key} style={{ display:"flex", justifyContent:"space-between", fontSize:13, padding:"6px 0", borderBottom:`1px solid ${C.border}` }}>
               <span style={{ color:C.muted }}>{p.label}</span>
               <span style={{ fontWeight:600, color:C.accent }}>{isNaN(v)?"—":v}</span>
@@ -494,7 +608,22 @@ function ShareLinkModal({ book, onClose }) {
   const [copied, setCopied] = useState(false);
   const url = book._url || "";
   const copy = () => {
-    navigator.clipboard.writeText(url).then(()=>{ setCopied(true); setTimeout(()=>setCopied(false),2000); }).catch(()=>{});
+    const doCopy = () => { setCopied(true); setTimeout(()=>setCopied(false),2000); };
+    if (navigator.clipboard && window.isSecureContext) {
+      navigator.clipboard.writeText(url).then(doCopy).catch(fallbackCopy);
+    } else {
+      fallbackCopy();
+    }
+    function fallbackCopy() {
+      try {
+        const ta = document.createElement("textarea");
+        ta.value = url; ta.style.cssText = "position:fixed;opacity:0;top:0;left:0";
+        document.body.appendChild(ta); ta.focus(); ta.select();
+        document.execCommand("copy");
+        document.body.removeChild(ta);
+        doCopy();
+      } catch(e) { /* silently fail */ }
+    }
   };
   return (
     <Modal onClose={onClose}>
@@ -560,6 +689,63 @@ function SyncSetup({ existing, onSave, onClose }) {
   );
 }
 
+// ─── CLOUD SYNC INDICATOR ────────────────────────────────────────────────────
+function CloudIndicator({ status }) {
+  // status: null | "idle" | "syncing" | "error" | "offline"
+  if (!status) return null;
+
+  // Colours
+  const colors = {
+    idle:    { cloud: "#a8c5a0", tick: "#6a9e61" },   // muted pastel green
+    syncing: { cloud: "#c4b49a", tick: "none" },       // warm muted (on-theme)
+    error:   { cloud: "#d4957a", tick: "#b05e3a" },    // on-theme muted red/terracotta
+    offline: { cloud: "#c8c0b4", tick: "none" },       // greyed out
+  };
+  const col = colors[status] || colors.offline;
+  const spinning = status === "syncing";
+
+  const titles = {
+    idle: "synced ✓",
+    syncing: "syncing…",
+    error: "sync failed",
+    offline: "offline",
+  };
+
+  return (
+    <svg
+      width="22" height="18" viewBox="0 0 22 18" fill="none"
+      xmlns="http://www.w3.org/2000/svg"
+      title={titles[status] || ""}
+      className={spinning ? "sync-cloud-spinning" : ""}
+      style={{ flexShrink:0, display:"block", transition:"opacity 0.3s", opacity: status==="offline" ? 0.45 : 1 }}
+    >
+      {/* Cloud shape */}
+      <path
+        d="M17.5 14H5.5C3.57 14 2 12.43 2 10.5C2 8.76 3.28 7.32 4.96 7.06C4.98 7.04 5 7.02 5 7C5 4.79 6.79 3 9 3C10.5 3 11.8 3.81 12.5 5.01C12.99 4.69 13.57 4.5 14.19 4.5C15.96 4.5 17.4 5.9 17.49 7.65C18.9 7.96 20 9.22 20 10.75C20 12.54 18.54 14 17.5 14Z"
+        fill={col.cloud}
+        opacity="0.85"
+      />
+      {/* Tick — only shown when idle */}
+      {status === "idle" && (
+        <path
+          d="M8 10.5L10 12.5L14 8.5"
+          stroke={col.tick}
+          strokeWidth="1.6"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        />
+      )}
+      {/* Error X — shown when error */}
+      {status === "error" && (
+        <g>
+          <line x1="9" y1="9" x2="13" y2="13" stroke={col.tick} strokeWidth="1.5" strokeLinecap="round"/>
+          <line x1="13" y1="9" x2="9" y2="13" stroke={col.tick} strokeWidth="1.5" strokeLinecap="round"/>
+        </g>
+      )}
+    </svg>
+  );
+}
+
 // ─── APP ──────────────────────────────────────────────────────────────────────
 // ─── SHARE PAGE (read-only, shown when ?share= is in URL) ────────────────────
 function SharePage({ data }) {
@@ -608,141 +794,64 @@ function SharePage({ data }) {
   );
 }
 
-// \u2500\u2500\u2500 SHELF VIEW PAGE (read-only, shown when ?shelf= is in URL) \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
-function ShelfViewPage({ books }) {
-  // Guard: if books is not a valid array, show error
-  if (!Array.isArray(books) || !books.length) {
-    return (
-      <div style={{ minHeight:"100vh", background:C.bg, display:"flex", alignItems:"center", justifyContent:"center" }}>
-        <div style={{ textAlign:"center", color:C.muted, fontSize:14 }}>
-          <Logo size={48}/>
-          <div style={{ marginTop:16 }}>This shelf link appears to be empty or invalid.</div>
-        </div>
-      </div>
-    );
-  }
-  return (
-    <div style={{ minHeight:"100vh", background:C.bg }}>
-      <div style={{ maxWidth:"var(--max-w,580px)", margin:"0 auto", padding:"28px 18px" }}>
-        <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:16 }}>
-          <div style={{ display:"flex", alignItems:"center", gap:10 }}>
-            <Logo size={34}/>
-            <h1 className="serif" style={{ fontSize:28, color:C.text, margin:0, fontWeight:700, letterSpacing:"-0.01em" }}>my shelf</h1>
-          </div>
-          <div style={{ fontSize:11, color:C.muted, fontStyle:"italic" }}>view only</div>
-        </div>
-        <div className="book-grid" style={{ marginBottom:20 }}>
-          {books.map((b, idx) => {
-            const finished = b.status === "finished";
-            const fs = (b.score !== null && b.score !== undefined) ? Number(b.score) : null;
-            return (
-              <div key={idx} style={{ background:C.warm, border:`1px solid ${C.border}`, borderRadius:12, position:"relative", overflow:"hidden", padding:"14px 12px" }}>
-                {finished && <div style={{ position:"absolute", top:10, right:-18, width:80, textAlign:"center", background:C.accentL, color:C.white, fontSize:9, fontWeight:700, letterSpacing:"0.05em", padding:"3px 0", transform:"rotate(35deg)", zIndex:2 }}>READ</div>}
-                {b.cover
-                  ? <img src={b.cover} alt="" style={{ width:"100%", height:80, objectFit:"cover", borderRadius:8, marginBottom:10 }} onError={e=>{ e.target.style.display='none'; }}/>
-                  : <div style={{ width:"100%", height:54, display:"flex", alignItems:"center", justifyContent:"center", marginBottom:6 }}><BookArt size={38}/></div>}
-                <div className="serif" style={{ fontSize:13, fontWeight:700, color:C.text, marginBottom:2, lineHeight:1.3 }}>{b.title||"Untitled"}</div>
-                <div style={{ fontSize:11, color:C.muted, marginBottom:6 }}>{b.author||""}</div>
-                {b.seriesName && (
-                  <div style={{ display:"inline-block", fontSize:10, color:C.accent, background:C.bg, border:`1px solid ${C.accentL}`, borderRadius:20, padding:"2px 8px", marginBottom:6 }}>
-                    {b.seriesName}{b.seriesNum ? ` #${b.seriesNum}` : ""}
-                  </div>
-                )}
-                <div style={{ marginTop:6, display:"flex", justifyContent:"space-between", alignItems:"flex-end" }}>
-                  {fs !== null && !isNaN(fs)
-                    ? <span className="serif" style={{ fontSize:24, fontWeight:700, color:C.accent, lineHeight:1 }}>{fs.toFixed(b.decimals||2)}<span style={{ fontSize:10, color:C.muted, fontWeight:400 }}>/5</span></span>
-                    : <span style={{ fontSize:12, color:C.muted }}>unrated</span>}
-                  <span style={{ fontSize:10, color:C.muted, background:C.border, padding:"2px 6px", borderRadius:20 }}>{b.status||""}</span>
-                </div>
-              </div>
-            );
-          })}
-        </div>
-        <div style={{ fontSize:11, color:C.muted, textAlign:"center", marginTop:16, fontStyle:"italic" }}>shared from my shelf \u2736</div>
-      </div>
-    </div>
-  );
-}
-
-// \u2500\u2500\u2500 SHELF SHARE LINK MODAL \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
-function ShelfShareLinkModal({ books, onClose }) {
-  const [copied, setCopied] = useState(false);
-  const [urlStr, setUrlStr] = useState("");
-
-  React.useEffect(()=>{
-    try {
-      const shelfData = books.map(b => {
-        const read = getActiveRead(b);
-        return {
-          title: b.title, author: b.author, genre: b.genre,
-          seriesName: b.seriesName, seriesNum: b.seriesNum,
-          status: b.status, cover: b.cover || null,
-          score: finalScoreForRead(read),
-          decimals: b.decimals || 2,
-        };
-      });
-      const encoded = btoa(unescape(encodeURIComponent(JSON.stringify(shelfData))));
-      setUrlStr(window.location.href.split('?')[0] + '?shelf=' + encoded);
-    } catch(e) {
-      console.error("ShelfShareLinkModal: failed to encode shelf data", e);
-    }
-  }, [books]);
-
-  const copy = () => {
-    if (!urlStr) return;
-    navigator.clipboard.writeText(urlStr).then(()=>{ setCopied(true); setTimeout(()=>setCopied(false), 2000); }).catch(()=>{
-      // Fallback for browsers that block clipboard
-      const ta = document.createElement('textarea');
-      ta.value = urlStr; document.body.appendChild(ta); ta.select();
-      try { document.execCommand('copy'); setCopied(true); setTimeout(()=>setCopied(false),2000); } catch(e2) {}
-      document.body.removeChild(ta);
-    });
-  };
-
-  return (
-    <Modal onClose={onClose}>
-      <div style={{ fontFamily:"'Playfair Display',serif", fontSize:18, fontWeight:700, color:C.text, marginBottom:6 }}>share your shelf</div>
-      <div style={{ fontSize:12, color:C.muted, marginBottom:16, lineHeight:1.6 }}>
-        Anyone with this link can view a read-only snapshot of your shelf \u2014 titles, covers, scores and statuses. No account needed.
-      </div>
-      <div style={{ background:C.warm, border:`1px solid ${C.border}`, borderRadius:8, padding:"10px 12px", fontSize:11, color:C.muted, wordBreak:"break-all", marginBottom:14, lineHeight:1.5, maxHeight:80, overflowY:"auto" }}>
-        {urlStr || "generating link\u2026"}
-      </div>
-      <button onClick={copy} disabled={!urlStr} style={primaryBtn}>{copied ? "copied \u2713" : "copy link"}</button>
-      <div style={{ marginTop:8 }}>
-        <button onClick={onClose} style={{ ...ghostBtn(C.muted), fontSize:12 }}>close</button>
-      </div>
-    </Modal>
-  );
-}
-
 function App() {
   // Check if this is a share link view
   const urlParams = new URLSearchParams(window.location.search);
   const shareParam = urlParams.get("share");
   if (shareParam) {
     try {
-      const data = JSON.parse(decodeURIComponent(escape(atob(shareParam.replace(/-/g,'+').replace(/_/g,'/')))));
+      // Try TextDecoder first (handles UTF-8 correctly)
+      let data;
+      try {
+        const binary = atob(shareParam);
+        const bytes = new Uint8Array(binary.length);
+        for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+        data = JSON.parse(new TextDecoder().decode(bytes));
+      } catch(e1) {
+        // Fallback
+        data = JSON.parse(decodeURIComponent(escape(atob(shareParam))));
+      }
+      if (!data || typeof data !== "object") throw new Error("invalid share data");
       return <SharePage data={data}/>;
     } catch(e) {
       // invalid share param, fall through to normal app
     }
   }
 
-  // Check if this is a shelf share link view
-  const shelfParam = urlParams.get("shelf");
-  if (shelfParam) {
-    try {
-      const shelfData = JSON.parse(decodeURIComponent(escape(atob(shelfParam.replace(/-/g,'+').replace(/_/g,'/')))));
-      if (Array.isArray(shelfData)) return <ShelfViewPage books={shelfData}/>;
-    } catch(e) {
-      // invalid shelf param, fall through to normal app
-    }
-  }
-
   const [books, setBooks] = useState(load);
   const [seriesVibes, setSeriesVibes] = useState(loadSV);
   const [bootSynced, setBootSynced] = useState(false);
+  const [bootPullDone, setBootPullDone] = useState(false); // guard: no push until pull completes
+
+  // ── INIT SYNC PILL ON STARTUP ────────────────────────────────────────────
+  useEffect(()=>{
+    if (syncConfig) { setSyncPillStatus("idle"); setSyncPillMsg("connected"); }
+  }, []);
+
+  // ── LOCALSTORAGE HEALTH CHECK ──────────────────────────────────────────────
+  // On mount, verify localStorage is readable and warn if storage seems lost
+  useEffect(()=>{
+    const stored = localStorage.getItem(STORAGE_KEY);
+    if (stored === null && !loadSyncConfig()) {
+      // No data and no sync config — fresh install, totally fine
+      return;
+    }
+    if (stored === null && loadSyncConfig()) {
+      // Had sync config but lost localStorage — data will be recovered from cloud
+      console.warn("localStorage appears cleared — will recover from cloud");
+      return;
+    }
+    try {
+      const parsed = JSON.parse(stored);
+      if (!Array.isArray(parsed)) {
+        console.error("localStorage data corrupt — resetting to []");
+        localStorage.setItem(STORAGE_KEY, "[]");
+      }
+    } catch(e) {
+      console.error("localStorage parse failed — resetting:", e);
+      localStorage.setItem(STORAGE_KEY, "[]");
+    }
+  }, []);
   const [view, setView] = useState("shelf");
   const [activeId, setActiveId] = useState(null);
   const [activeSeries, setActiveSeries] = useState(null);
@@ -760,37 +869,132 @@ function App() {
   const [syncConfig, setSyncConfig] = useState(loadSyncConfig);
   const [syncSetupOpen, setSyncSetupOpen] = useState(false);
   const [syncStatus, setSyncStatus] = useState(null);
+  // "idle" | "syncing" | "error" | "offline" — drives the home-page pill
+  const [syncPillStatus, setSyncPillStatus] = useState(null); // null = hidden (no sync configured)
+  const [syncPillMsg, setSyncPillMsg] = useState("");
   const [search, setSearch] = useState("");
   const [shareLinkBook, setShareLinkBook] = useState(null); // book being shared as link
-  const [shelfShareLinkOpen, setShelfShareLinkOpen] = useState(false);
-  const [bootPullDone, setBootPullDone] = useState(false);
   const [dragOrder, setDragOrder] = useState(null); // custom order array of book ids
   const [dragIdx, setDragIdx] = useState(null);
   const [dragOverIdx, setDragOverIdx] = useState(null);
   const coverRef = useRef();
+  const menuRef = useRef();
 
-  // Save to local storage
-  useEffect(()=>{ save(books); }, [books]);
+  // Close menu on outside click
+  useEffect(()=>{
+    if (!menuOpen) return;
+    const handler = (e) => {
+      if (menuRef.current && !menuRef.current.contains(e.target)) {
+        setMenuOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, [menuOpen]);
+
+  // Save to local storage — check for quota errors
+  useEffect(()=>{
+    const result = save(books);
+    if (result === "quota") {
+      // Show banner via DOM directly (showBanner defined below, but DOM always available)
+      const b = document.getElementById("sync-banner");
+      if (b) { b.textContent = "⚠ storage full — try removing a cover image"; b.classList.add("show"); setTimeout(()=>b.classList.remove("show"), 6000); }
+    }
+  }, [books]);
   useEffect(()=>{ saveSV(seriesVibes); }, [seriesVibes]);
 
-  // ── AUTO-PULL ON STARTUP ──────────────────────────────────────────
-  // SAFE: never push until pull completes; never push empty array to cloud
+  // ── AUTO-PULL ON STARTUP ──────────────────────────────────────────────────
+  // On first load, if sync is configured, pull from cloud and merge with local.
+  // This ensures changes made on another device are picked up immediately.
   useEffect(()=>{
     if (!syncConfig || bootSynced) return;
     setBootSynced(true);
+    const cfg = syncConfig;
+    setSyncPillStatus("syncing"); setSyncPillMsg("checking…");
     showBanner("checking for updates…");
-    syncFromCloud(syncConfig).then(remote => {
-      if (!remote || !Array.isArray(remote.books) || remote.books.length === 0) {
-        showBanner("", 1); setBootPullDone(true); return;
+    syncFromCloud(cfg).then(remote => {
+      if (!remote || !remote.books) {
+        showBanner("no cloud data found", 2000);
+        console.warn("Boot sync: empty response", remote);
+        setSyncPillStatus("idle"); setSyncPillMsg("up to date");
+        return;
       }
-      setBooks(prev => { const m = mergeBooks(prev, remote.books); save(m); return m; });
-      setSeriesVibes(prev => { const m = mergeSeries(prev, remote.seriesVibes||{}); saveSV(m); return m; });
-      showBanner("up to date ✓", 1800);
+      console.log("Boot sync: got", remote.books.length, "books from cloud");
+      if (remote.books.length === 0) {
+        showBanner("cloud is empty — your local data is safe", 2500);
+        setSyncPillStatus("idle"); setSyncPillMsg("up to date");
+        return;
+      }
+      setBooks(prev => {
+        const merged = mergeBooks(prev, remote.books);
+        save(merged);
+        return merged;
+      });
+      setSeriesVibes(prev => {
+        const merged = mergeSeries(prev, remote.seriesVibes);
+        saveSV(merged);
+        return merged;
+      });
+      showBanner("synced ✓ (" + remote.books.length + " from cloud)", 2000);
+      setSyncPillStatus("idle"); setSyncPillMsg("synced just now");
     }).catch(e => {
-      showBanner("", 1);
-      console.warn("Boot sync failed:", e);
-    }).finally(()=>{ setBootPullDone(true); });
+      showBanner("sync failed — " + e.message, 3500);
+      console.error("Boot sync error:", e);
+      setSyncPillStatus(navigator.onLine === false ? "offline" : "error");
+      setSyncPillMsg(navigator.onLine === false ? "offline" : "sync failed");
+    }).finally(()=>{
+      setBootPullDone(true); // allow auto-push now
+    });
   }, [syncConfig]);
+
+  // ── ONLINE/OFFLINE REAL-TIME PILL UPDATE ──────────────────────────────────
+  useEffect(()=>{
+    const goOffline = () => {
+      setSyncPillStatus("offline");
+      setSyncPillMsg("offline");
+    };
+    const goOnline = () => {
+      // Only flip back to idle if we were showing offline — don't overwrite "syncing"
+      setSyncPillStatus(s => s === "offline" ? (syncConfig ? "idle" : null) : s);
+      setSyncPillMsg(m => m === "offline" ? "back online" : m);
+    };
+    window.addEventListener("offline", goOffline);
+    window.addEventListener("online", goOnline);
+    return () => {
+      window.removeEventListener("offline", goOffline);
+      window.removeEventListener("online", goOnline);
+    };
+  }, [syncConfig]);
+
+  // ── CROSS-TAB SYNC via storage event ────────────────────────────────────
+  // When another tab saves to localStorage, merge their changes in
+  useEffect(()=>{
+    const onStorage = (e) => {
+      if (e.key === STORAGE_KEY && e.newValue) {
+        try {
+          const incoming = JSON.parse(e.newValue);
+          if (!Array.isArray(incoming) || incoming.length === 0) return;
+          setBooks(prev => {
+            const merged = mergeBooks(prev, incoming);
+            // Only update if something actually changed
+            if (merged.length === prev.length &&
+                merged.every((b,i) => b.updatedAt === prev[i]?.updatedAt)) return prev;
+            return merged;
+          });
+        } catch(e) { /* ignore corrupt cross-tab data */ }
+      }
+      if (e.key === SERIES_VIBE_KEY && e.newValue) {
+        try {
+          const incoming = JSON.parse(e.newValue);
+          if (incoming && typeof incoming === "object") {
+            setSeriesVibes(prev => mergeSeries(prev, incoming));
+          }
+        } catch(e) {}
+      }
+    };
+    window.addEventListener("storage", onStorage);
+    return () => window.removeEventListener("storage", onStorage);
+  }, []);
 
   // Refs so debounced sync always sees latest state
   const booksRef = useRef(books);
@@ -801,25 +1005,37 @@ function App() {
   useEffect(()=>{ syncConfigRef.current = syncConfig; }, [syncConfig]);
 
   const syncTimer = useRef(null);
+  // Cleanup sync timer on unmount to prevent setState-after-unmount
+  useEffect(()=>{ return ()=>clearTimeout(syncTimer.current); }, []);
   useEffect(()=>{
     if (!syncConfig) return;
     clearTimeout(syncTimer.current);
     syncTimer.current = setTimeout(async ()=>{
       const cfg = syncConfigRef.current;
       if (!cfg) return;
-      // SAFETY: never push until we have pulled from cloud on startup
-      if (!bootPullDone) { console.warn("Auto-sync skipped: boot pull not done"); return; }
-      // SAFETY: never push empty books array — would wipe cloud data
-      if (!booksRef.current || booksRef.current.length === 0) { console.warn("Auto-sync skipped: empty books"); return; }
+      // SAFETY 1: never push until we've pulled from cloud on startup
+      if (syncConfig && !bootPullDone) {
+        console.warn("Auto-sync skipped: waiting for boot pull to complete");
+        return;
+      }
+      // SAFETY 2: never push empty books to cloud — would wipe everyone's data
+      if (!booksRef.current || booksRef.current.length === 0) {
+        console.warn("Auto-sync skipped: local books is empty, not overwriting cloud");
+        return;
+      }
+      setSyncPillStatus("syncing"); setSyncPillMsg("saving…");
       showBanner("syncing…");
       try {
         await syncToCloud(cfg, booksRef.current, seriesVibesRef.current);
         showBanner("synced ✓", 1500);
+        setSyncPillStatus("idle"); setSyncPillMsg("saved just now");
       } catch(e) {
         showBanner("sync failed — " + e.message, 3500);
+        setSyncPillStatus(navigator.onLine === false ? "offline" : "error");
+        setSyncPillMsg(navigator.onLine === false ? "offline" : "sync failed");
       }
     }, 1200);
-  }, [books, seriesVibes, bootPullDone]);
+  }, [books, seriesVibes]);
 
   const showBanner = (msg, hide=0) => {
     const b = document.getElementById("sync-banner");
@@ -830,52 +1046,53 @@ function App() {
 
   const pullFromCloud = async () => {
     if (!syncConfig) return;
+    setSyncPillStatus("syncing"); setSyncPillMsg("pulling…");
     showBanner("pulling from cloud…");
     try {
       const remote = await syncFromCloud(syncConfig);
-      if (remote) {
-        setBooks(prev => {
-          const remoteIds = new Set(remote.books.map(b=>b.id));
-          const localOnly = prev.filter(b=>!remoteIds.has(b.id));
-          const merged = [...remote.books, ...localOnly];
-          save(merged);
-          return merged;
-        });
-        setSeriesVibes(prev => {
-          const merged = {...prev,...remote.seriesVibes};
-          saveSV(merged);
-          return merged;
-        });
-        setDragOrder(null);
-      showBanner("pulled ✓ (" + remote.books.length + " books)", 2500);
-      } else {
-        showBanner("no remote data found", 2000);
+      if (!remote || !remote.books || remote.books.length === 0) {
+        showBanner("no data found in cloud", 2500);
+        setSyncPillStatus("idle"); setSyncPillMsg("up to date");
+        return;
       }
+      setBooks(prev => {
+        const merged = mergeBooks(prev, remote.books);
+        save(merged);
+        return merged;
+      });
+      setSeriesVibes(prev => {
+        const merged = mergeSeries(prev, remote.seriesVibes);
+        saveSV(merged);
+        return merged;
+      });
+      showBanner("pulled ✓ (" + remote.books.length + " from cloud)", 2500);
+      setSyncPillStatus("idle"); setSyncPillMsg("synced just now");
     } catch(e) {
-      showBanner("pull failed — "+e.message, 3500);
+      showBanner("pull failed — " + e.message, 3500);
+      setSyncPillStatus(navigator.onLine === false ? "offline" : "error");
+      setSyncPillMsg(navigator.onLine === false ? "offline" : "pull failed");
       console.error("Pull error:", e);
     }
   };
 
   const active = books.find(b=>b.id===activeId);
-  const upd = (id,fn) => setBooks(bs=>bs.map(b=>{
-    if (b.id!==id) return b;
-    try { return {...fn(b), updatedAt:Date.now()}; }
-    catch(e) { console.error("upd() fn threw for book", id, e); return b; }
-  }));
+  const upd = (id,fn) => setBooks(bs=>bs.map(b=>b.id===id?{...fn(b),updatedAt:Date.now(),_v:8}:b));
   const go = (v, extra={}) => {
     if(extra.id) setActiveId(extra.id);
     if(extra.series) setActiveSeries(extra.series);
     setView(v);
     setMenuOpen(false);
-    setShareOpen(false);
-    try { window.scrollTo(0,0); } catch(e) {}
+    setShareOpen(false);  // always close share on navigation
+    window.scrollTo(0,0);
   };
 
   const exportJSON = () => {
-    const blob = new Blob([JSON.stringify(books,null,2)],{type:"application/json"});
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a"); a.href=url; a.download="my_shelf.json"; a.click();
+    try {
+      const blob = new Blob([JSON.stringify(books,null,2)],{type:"application/json"});
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a"); a.href=url; a.download="my_shelf.json"; a.click();
+      setTimeout(()=>URL.revokeObjectURL(url), 30000);
+    } catch(e) { showBanner("export failed — " + (e.message||"unknown error"), 3000); }
   };
 
   const importJSON = (e) => {
@@ -884,16 +1101,17 @@ function App() {
     const reader = new FileReader();
     reader.onload = ev => {
       try {
+        if (!ev.target || !ev.target.result) { showBanner("import failed — empty file", 2500); return; }
         const imported = JSON.parse(ev.target.result);
-        if (Array.isArray(imported)) {
-          const valid = imported.filter(b => b && typeof b === 'object').map(b => b.id ? b : {...b, id: Date.now()+Math.random()});
-          setBooks(prev => {
-            const ids = new Set(prev.map(b=>b.id));
-            return [...prev, ...valid.filter(b=>!ids.has(b.id))];
-          });
-          showBanner("imported "+valid.length+" books ✓", 2500);
-        } else { showBanner("import failed — not a valid shelf file", 2500); }
-      } catch(e) { console.error("import:", e); showBanner("import failed — invalid JSON", 2500); }
+        if (!Array.isArray(imported)) { showBanner("import failed — expected JSON array", 2500); return; }
+        if (imported.length === 0) { showBanner("import file is empty", 2500); return; }
+        setBooks(prev => {
+          const ids = new Set(prev.map(b=>b.id));
+          const merged = [...prev, ...imported.filter(b=>b && b.id && !ids.has(b.id))];
+          return merged;
+        });
+        showBanner("imported "+imported.length+" books ✓", 2500);
+      } catch(e) { showBanner("import failed — " + (e.message||"invalid file"), 2500); }
     };
     reader.readAsText(file);
     e.target.value="";
@@ -935,6 +1153,9 @@ function App() {
     const handleDrop = (e, idx) => {
       e.preventDefault();
       if (dragIdx === null || dragIdx === idx) { setDragIdx(null); setDragOverIdx(null); return; }
+      if (dragIdx < 0 || dragIdx >= displayBooks.length || idx < 0 || idx >= displayBooks.length) {
+        setDragIdx(null); setDragOverIdx(null); return;
+      }
       const ids = displayBooks.map(b=>b.id);
       const moved = ids.splice(dragIdx, 1)[0];
       ids.splice(idx, 0, moved);
@@ -952,12 +1173,13 @@ function App() {
             <h1 className="serif" style={{ fontSize:28, color:C.text, margin:0, fontWeight:700, letterSpacing:"-0.01em" }}>my shelf</h1>
           </div>
           <div style={{ display:"flex", gap:8, alignItems:"center" }}>
-            {syncConfig && (
-              <button onClick={pullFromCloud} title="Pull latest from cloud"
-                style={{ background:"none", border:`1px solid ${C.border}`, borderRadius:8, color:C.muted, cursor:"pointer", fontSize:15, padding:"3px 10px" }}>↻</button>
-            )}
+            <div style={{ display:"flex", alignItems:"center", gap:5 }}>
+              <button onClick={pullFromCloud} disabled={!syncConfig} title={syncConfig?"Pull latest from cloud":"Set up sync to enable"} 
+                style={{ background:"none", border:`1px solid ${C.border}`, borderRadius:8, color:syncConfig?C.muted:C.border, cursor:syncConfig?"pointer":"default", fontSize:15, padding:"3px 10px" }}>↻</button>
+              <CloudIndicator status={syncConfig ? (syncPillStatus||"idle") : "offline"}/>
+            </div>
             <button onClick={()=>go("stats")} style={{ background:"none", border:"none", color:C.muted, cursor:"pointer", fontSize:13, padding:"4px 8px" }}>stats</button>
-            <div style={{ position:"relative" }}>
+            <div style={{ position:"relative" }} ref={menuRef}>
               <button onClick={()=>setMenuOpen(m=>!m)} style={{ background:"none", border:`1px solid ${C.border}`, borderRadius:8, color:C.muted, cursor:"pointer", fontSize:18, padding:"2px 10px", lineHeight:1.4 }}>· · ·</button>
               {menuOpen && (
                 <div style={{ position:"absolute", right:0, top:38, background:C.bg, border:`1px solid ${C.border}`, borderRadius:12, padding:10, zIndex:10, minWidth:200, boxShadow:"0 4px 20px rgba(0,0,0,0.12)" }}>
@@ -993,10 +1215,6 @@ function App() {
                   <button onClick={()=>{ setSyncSetupOpen(true); setMenuOpen(false); }}
                     style={{ display:"block", width:"100%", textAlign:"left", background:"none", border:"none", color:syncConfig?C.accent:C.text, fontSize:13, padding:"7px 12px", cursor:"pointer", borderRadius:6, fontWeight:syncConfig?600:400 }}>
                     {syncConfig?"✦ sync connected":"set up sync"}
-                  </button>
-                  <button onClick={()=>{ setShelfShareLinkOpen(true); setMenuOpen(false); }}
-                    style={{ display:"block", width:"100%", textAlign:"left", background:"none", border:"none", color:C.text, fontSize:13, padding:"7px 12px", cursor:"pointer", borderRadius:6 }}>
-                    ↗ share shelf (view-only)
                   </button>
                 </div>
               )}
@@ -1039,7 +1257,7 @@ function App() {
                       <div style={{ fontSize:11, color:C.muted, marginBottom:4 }}>{b.author}</div>
                       {b.startDate && <div style={{ fontSize:10, color:C.muted }}>started {b.startDate}</div>}
                     </div>
-                    {fs!==null && !isNaN(fs) && <span className="serif" style={{ fontSize:22, fontWeight:700, color:C.accent, flexShrink:0 }}>{Number(fs).toFixed(b.decimals||2)}</span>}
+                    {fs!==null && <span className="serif" style={{ fontSize:22, fontWeight:700, color:C.accent, flexShrink:0 }}>{fs.toFixed(b.decimals||2)}</span>}
                   </div>
                 );
               })}
@@ -1083,7 +1301,7 @@ function App() {
                   )}
                   <div onClick={()=>go("book",{id:b.id})}>
                     {b.cover
-                      ? <img src={b.cover} alt="" style={{ width:"100%", height:80, objectFit:"cover", borderRadius:8, marginBottom:10 }} onError={e=>{ e.target.style.display='none'; }}/>
+                      ? <img src={b.cover} alt="" style={{ width:"100%", height:80, objectFit:"cover", borderRadius:8, marginBottom:10 }}/>
                       : <div style={{ width:"100%", height:54, display:"flex", alignItems:"center", justifyContent:"center", marginBottom:6 }}><BookArt size={38}/></div>}
                     <div className="serif" style={{ fontSize:13, fontWeight:700, color:C.text, marginBottom:2, lineHeight:1.3 }}>{b.title||"Untitled"}</div>
                     <div style={{ fontSize:11, color:C.muted, marginBottom:6 }}>{b.author}</div>
@@ -1096,8 +1314,8 @@ function App() {
                   )}
                   <div onClick={()=>go("book",{id:b.id})}>
                     <div style={{ marginTop:6, display:"flex", justifyContent:"space-between", alignItems:"flex-end" }}>
-                      {fs!==null && !isNaN(fs)
-                        ? <span className="serif" style={{ fontSize:24, fontWeight:700, color:C.accent, lineHeight:1 }}>{Number(fs).toFixed(b.decimals||2)}<span style={{ fontSize:10, color:C.muted, fontWeight:400 }}>/5</span></span>
+                      {fs!==null
+                        ? <span className="serif" style={{ fontSize:24, fontWeight:700, color:C.accent, lineHeight:1 }}>{fs.toFixed(b.decimals||2)}<span style={{ fontSize:10, color:C.muted, fontWeight:400 }}>/5</span></span>
                         : <span style={{ fontSize:12, color:C.muted }}>unrated</span>}
                       <span style={{ fontSize:10, color:C.muted, background:C.border, padding:"2px 6px", borderRadius:20 }}>{b.status}</span>
                     </div>
@@ -1109,9 +1327,8 @@ function App() {
         )}
         <button onClick={()=>{ setDraft(emptyBook()); setIsEditing(false); go("add"); }} style={ghostBtn(C.accentL)}>+ add a book</button>
       </div>
-      {syncSetupOpen && <SyncSetup existing={syncConfig} onSave={cfg=>{ saveSyncConfig(cfg); setSyncConfig(cfg); setSyncSetupOpen(false); }} onClose={()=>setSyncSetupOpen(false)}/>}
+      {syncSetupOpen && <SyncSetup existing={syncConfig} onSave={cfg=>{ saveSyncConfig(cfg); setSyncConfig(cfg); setSyncSetupOpen(false); if (cfg) { setSyncPillStatus("idle"); setSyncPillMsg("connected"); } else { setSyncPillStatus(null); setSyncPillMsg(""); } }} onClose={()=>setSyncSetupOpen(false)}/>}
       {shareLinkBook && <ShareLinkModal book={shareLinkBook} onClose={()=>setShareLinkBook(null)}/>}
-      {shelfShareLinkOpen && <ShelfShareLinkModal books={books} onClose={()=>setShelfShareLinkOpen(false)}/>}
     </div>
   );
   }
@@ -1138,7 +1355,36 @@ function App() {
             <label style={lbl}>Cover photo</label>
             <input type="file" accept="image/*" ref={coverRef} style={{ display:"none" }} onChange={e=>{
               const file=e.target.files[0]; if(!file) return;
-              const r=new FileReader(); r.onload=ev=>setDraft(d=>({...d,cover:ev.target.result})); r.readAsDataURL(file);
+              const r=new FileReader();
+              r.onload=ev=>{
+                if (!ev.target || !ev.target.result) return;
+                // Compress via canvas — keeps quality, kills file size
+                const img = new Image();
+                img.onload = () => {
+                  const MAX = 600; // max width or height in px
+                  let w = img.width, h = img.height;
+                  if (w > MAX || h > MAX) {
+                    if (w > h) { h = Math.round(h * MAX / w); w = MAX; }
+                    else { w = Math.round(w * MAX / h); h = MAX; }
+                  }
+                  const canvas = document.createElement("canvas");
+                  canvas.width = w; canvas.height = h;
+                  const ctx = canvas.getContext("2d");
+                  ctx.drawImage(img, 0, 0, w, h);
+                  // Try progressively lower quality until it fits comfortably
+                  let quality = 0.82;
+                  let dataUrl = canvas.toDataURL("image/jpeg", quality);
+                  while (dataUrl.length > 300 * 1024 && quality > 0.3) {
+                    quality -= 0.1;
+                    dataUrl = canvas.toDataURL("image/jpeg", quality);
+                  }
+                  setDraft(d=>({...d,cover:dataUrl}));
+                };
+                img.onerror = () => showBanner("cover upload failed — try another image", 3000);
+                img.src = ev.target.result;
+              };
+              r.onerror=()=>showBanner("cover upload failed — try another image", 3000);
+              r.readAsDataURL(file);
             }}/>
             <div style={{ display:"flex", gap:10, alignItems:"center" }}>
               <button onClick={()=>coverRef.current?.click()} style={{ ...ghostBtn(C.accentL), width:"auto", padding:"8px 16px", fontSize:12 }}>
@@ -1167,7 +1413,7 @@ function App() {
           <button onClick={()=>{
             if(!draft.title.trim()) return;
             if(isEdit){ setBooks(bs=>bs.map(b=>b.id===draft.id?{...draft,updatedAt:Date.now()}:b)); go("book"); }
-            else { const nb={...draft,id:Date.now(),updatedAt:Date.now()}; setBooks(bs=>[...bs,nb]); setActiveId(nb.id); go("shelf"); }
+            else { const newId = Date.now().toString(36)+"-"+Math.random().toString(36).slice(2); const nb={...draft,id:newId,updatedAt:Date.now()}; setBooks(bs=>[...bs,nb]); setActiveId(newId); go("shelf"); }
           }} style={primaryBtn}>{isEdit?"save changes":"add to shelf"}</button>
         </div>
       </div>
@@ -1175,6 +1421,11 @@ function App() {
   }
 
   // ── BOOK PAGE ──────────────────────────────────────────────────────────────
+  if (view==="book" && !active && activeId) {
+    // Book was deleted or not found — bounce back to shelf
+    setTimeout(()=>go("shelf"), 0);
+    return null;
+  }
   if (view==="book" && active) {
     const reads = (active.reads && active.reads.length > 0) ? active.reads : null;
     const activeReadIdx = Math.min(active.activeReadIdx||0, reads ? reads.length-1 : 0);
@@ -1182,29 +1433,46 @@ function App() {
     const fs = finalScoreForRead(currentRead);
 
     const generateShareLink = () => {
+      const data = {
+        title: active.title, author: active.author, genre: active.genre,
+        seriesName: active.seriesName, seriesNum: active.seriesNum,
+        pillars: currentRead.pillars, vibe: currentRead.vibe,
+        decimals: active.decimals||2,
+        score: fs,
+      };
+      let encoded;
       try {
-        const data = {
-          title: active.title||"", author: active.author||"", genre: active.genre||"",
-          seriesName: active.seriesName||"", seriesNum: active.seriesNum||"",
-          pillars: currentRead.pillars||{}, vibe: currentRead.vibe||"",
-          decimals: active.decimals||2,
-          score: fs,
-        };
-        const encoded = btoa(unescape(encodeURIComponent(JSON.stringify(data))));
-        const url = (window.location.href.split('?')[0]) + '?share=' + encoded;
+        const jsonStr = JSON.stringify(data);
+        // Use TextEncoder for safe UTF-8 base64 encoding
+        if (typeof TextEncoder !== "undefined") {
+          const bytes = new TextEncoder().encode(jsonStr);
+          let binary = "";
+          bytes.forEach(b => binary += String.fromCharCode(b));
+          encoded = btoa(binary);
+        } else {
+          encoded = btoa(unescape(encodeURIComponent(jsonStr)));
+        }
+      } catch(e) { encoded = ""; console.error("Share encode failed:", e); }
+      const url = window.location.href.split('?')[0] + '?share=' + encoded;
+      if (navigator.clipboard && window.isSecureContext) {
         navigator.clipboard.writeText(url).catch(()=>{});
-        setShareLinkBook({ ...data, _url: url });
-      } catch(e) {
-        console.error("generateShareLink failed:", e);
-        showBanner("failed to generate link", 2500);
+      } else {
+        try {
+          const ta = document.createElement("textarea");
+          ta.value = url; ta.style.cssText = "position:fixed;opacity:0;top:0;left:0";
+          document.body.appendChild(ta); ta.focus(); ta.select();
+          document.execCommand("copy");
+          document.body.removeChild(ta);
+        } catch(e) {}
       }
+      setShareLinkBook({ ...data, _url: url });
     };
 
     return (
     <div style={pageStyle} className="fade-in">
       <div style={wrapStyle(520)}>
         <button onClick={()=>go("shelf")} style={backBtn}>‹ shelf</button>
-        {active.cover && <img src={active.cover} alt="" style={{ width:"100%", maxHeight:200, objectFit:"cover", borderRadius:14, marginBottom:20 }} onError={e=>{ e.target.style.display='none'; }}/>}
+        {active.cover && <img src={active.cover} alt="" style={{ width:"100%", maxHeight:200, objectFit:"cover", borderRadius:14, marginBottom:20 }}/>}
         <div style={{ marginBottom:20 }}>
           {active.seriesName && (
             <div onClick={()=>go("series",{series:active.seriesName})}
@@ -1229,9 +1497,9 @@ function App() {
             }
             return <div style={{ fontSize:11, color:C.muted, marginBottom:4 }}>{line}</div>;
           })()}
-          {fs!==null && !isNaN(fs) && (
+          {fs!==null && (
             <div style={{ marginTop:10 }}>
-              <span className="serif" style={{ fontSize:44, fontWeight:700, color:C.accent, lineHeight:1 }}>{Number(fs).toFixed(active.decimals||2)}</span>
+              <span className="serif" style={{ fontSize:44, fontWeight:700, color:C.accent, lineHeight:1 }}>{fs.toFixed(active.decimals||2)}</span>
               <span style={{ fontSize:14, color:C.muted, fontWeight:400 }}> / 5</span>
             </div>
           )}
@@ -1254,8 +1522,8 @@ function App() {
                 </button>
               ))}
               <button onClick={()=>{
-                const newRead = emptyRead(`Read ${((reads||[]).length)+1}`);
-                upd(active.id, b=>({ ...b, reads:[...(Array.isArray(b.reads)?b.reads:[]), newRead], activeReadIdx:(Array.isArray(b.reads)?b.reads:[]).length }));
+                const newRead = emptyRead(`Read ${(reads.length)+1}`);
+                upd(active.id, b=>({ ...b, reads:[...(b.reads||[]), newRead], activeReadIdx:(b.reads||[]).length }));
               }} style={{ padding:"6px 12px", borderRadius:20, border:`1px solid ${C.border}`, background:"transparent", color:C.muted, fontSize:12, cursor:"pointer" }}>+ reread</button>
             </div>
           </div>
@@ -1340,9 +1608,10 @@ function App() {
         </div>
 
         <button onClick={()=>{
-          if(window.confirm("Remove this book from your shelf?")) {
+          let confirmed = false;
+          try { confirmed = window.confirm("Remove this book from your shelf?"); } catch(e) { confirmed = true; }
+          if(confirmed) {
             setBooks(bs=>bs.filter(b=>b.id!==active.id));
-            setDragOrder(prev => prev ? prev.filter(id => id !== active.id) : null);
             go("shelf");
           }
         }} style={ghostBtn(C.danger)}>remove book</button>
@@ -1351,10 +1620,10 @@ function App() {
       {editShiftsOpen && (() => {
         const curve = currentRead.curve||[];
         const updateCurve = (newCurve) => {
-          if (reads) upd(active.id,b=>({...b,reads:(Array.isArray(b.reads)?b.reads:[]).map((r,ri)=>ri===activeReadIdx?{...r,curve:newCurve}:r)}));
+          if (reads) upd(active.id,b=>({...b,reads:b.reads.map((r,ri)=>ri===activeReadIdx?{...r,curve:newCurve}:r)}));
           else upd(active.id,b=>({...b,curve:newCurve}));
         };
-        let shiftDragIdx = null;
+        const shiftDragRef = { current: null };
         return (
         <Modal onClose={()=>setEditShiftsOpen(false)}>
           <div style={{ fontWeight:700, fontSize:16, color:C.text, marginBottom:4, fontFamily:"'Playfair Display',serif" }}>edit shifts — {currentRead.label||"Read 1"}</div>
@@ -1362,15 +1631,16 @@ function App() {
           {!curve.length && <div style={{ color:C.muted, fontSize:13 }}>No shifts logged yet.</div>}
           {curve.map((pt,i)=>(
             <div key={i} draggable
-              onDragStart={e=>{ shiftDragIdx=i; e.dataTransfer.effectAllowed="move"; }}
+              onDragStart={e=>{ shiftDragRef.current=i; e.dataTransfer.effectAllowed="move"; }}
               onDragOver={e=>e.preventDefault()}
               onDrop={e=>{
                 e.preventDefault();
+                const shiftDragIdx = shiftDragRef.current;
                 if (shiftDragIdx===null||shiftDragIdx===i) return;
                 const newCurve=[...curve];
                 const moved=newCurve.splice(shiftDragIdx,1)[0];
                 newCurve.splice(i,0,moved);
-                shiftDragIdx=null;
+                shiftDragRef.current=null;
                 updateCurve(newCurve);
               }}
               style={{ padding:"10px 0", borderBottom:`1px solid ${C.border}`, cursor:"grab" }}>
@@ -1445,7 +1715,9 @@ function App() {
 
     const doLog = () => {
       if (!logDraft.score) return;
-      const score = parseFloat(clampNum(logDraft.score,1,10));
+      const rawScore = clampNum(logDraft.score,1,10);
+      if (isNaN(rawScore)) return;
+      const score = parseFloat(rawScore);
       const label = newLabel || `pt ${currentCurve.length+1}`;
       const newAnchor = {label,score,note:logDraft.note,anchor:isChapterPoint};
 
@@ -1492,7 +1764,7 @@ function App() {
       };
 
       if (reads) {
-        upd(active.id,b=>({...b,reads:(Array.isArray(b.reads)?b.reads:[]).map((r,ri)=>ri===activeReadIdx?{...r,curve:buildNewCurve(r.curve||[])}:r)}));
+        upd(active.id,b=>({...b,reads:b.reads.map((r,ri)=>ri===activeReadIdx?{...r,curve:buildNewCurve(r.curve||[])}:r)}));
       } else {
         upd(active.id,b=>({...b,curve:buildNewCurve(b.curve||[])}));
       }
@@ -1545,11 +1817,11 @@ function App() {
     const fs = finalScoreForRead(currentRead);
 
     const updPillar = (key, v) => {
-      if (reads) upd(active.id,b=>({...b,reads:(Array.isArray(b.reads)?b.reads:[]).map((r,ri)=>ri===activeReadIdx?{...r,pillars:{...(r.pillars||{}),[key]:v}}:r)}));
+      if (reads) upd(active.id,b=>({...b,reads:b.reads.map((r,ri)=>ri===activeReadIdx?{...r,pillars:{...r.pillars,[key]:v}}:r)}));
       else upd(active.id,b=>({...b,pillars:{...b.pillars,[key]:v}}));
     };
     const updVibe = (v) => {
-      if (reads) upd(active.id,b=>({...b,reads:(Array.isArray(b.reads)?b.reads:[]).map((r,ri)=>ri===activeReadIdx?{...r,vibe:v}:r)}));
+      if (reads) upd(active.id,b=>({...b,reads:b.reads.map((r,ri)=>ri===activeReadIdx?{...r,vibe:v}:r)}));
       else upd(active.id,b=>({...b,vibe:v}));
     };
 
@@ -1569,10 +1841,10 @@ function App() {
           <ScoreField label="Vibe" prompt="Pure gut feeling. No logic. How do you feel about this book right now?" max={5}
             value={currentRead.vibe||""} decimals={active.decimals||2}
             onChange={updVibe}/>
-          {fs!==null && !isNaN(fs) && (
+          {fs!==null && (
             <div style={{ textAlign:"center", padding:18, background:C.warm, borderRadius:12, border:`1px solid ${C.border}`, margin:"12px 0" }}>
               <div style={{ fontSize:12, color:C.muted, marginBottom:4, letterSpacing:"0.06em", textTransform:"uppercase" }}>final score</div>
-              <div className="serif" style={{ fontSize:42, fontWeight:700, color:C.accent }}>{Number(fs).toFixed(active.decimals||2)}<span style={{ fontSize:16, color:C.muted, fontWeight:400 }}> / 5</span></div>
+              <div className="serif" style={{ fontSize:42, fontWeight:700, color:C.accent }}>{fs.toFixed(active.decimals||2)}<span style={{ fontSize:16, color:C.muted, fontWeight:400 }}> / 5</span></div>
             </div>
           )}
           <button onClick={()=>go("book")} style={primaryBtn}>save & go back</button>
@@ -1583,7 +1855,7 @@ function App() {
 
   // ── SERIES ─────────────────────────────────────────────────────────────────
   if (view==="series" && activeSeries) {
-    const seriesBooks = books.filter(b=>b && b.seriesName===activeSeries).sort((a,b)=>(parseFloat(a.seriesNum)||0)-(parseFloat(b.seriesNum)||0));
+    const seriesBooks = books.filter(b=>b.seriesName===activeSeries).sort((a,b)=>(parseFloat(a.seriesNum)||0)-(parseFloat(b.seriesNum)||0));
     const scores = seriesBooks.map(b=>finalScore(b)).filter(v=>v!==null);
     const avgScore = scores.length ? scores.reduce((a,c)=>a+c,0)/scores.length : null;
     const sv = parseFloat(seriesVibes[activeSeries]||"");
@@ -1613,9 +1885,10 @@ function App() {
               const curve = read.curve||[];
               const n = curve.length;
               const color = CURVE_COLORS[bi % CURVE_COLORS.length];
-              const pts = curve.map((pt,i)=>({
-                x: pL+(n===1?plotW/2:(i/(n-1))*plotW),
-                y: pT+(1-(pt.score-1)/(10-1))*plotH,
+              const safePts = curve.filter(pt => pt && !isNaN(parseFloat(pt.score)));
+              const pts = safePts.map((pt,i)=>({
+                x: pL+(safePts.length===1?plotW/2:(i/(safePts.length-1))*plotW),
+                y: pT+(1-(Math.min(10,Math.max(1,pt.score))-1)/(10-1))*plotH,
                 ...pt
               }));
               const polyline = pts.map(p=>`${p.x},${p.y}`).join(' ');
@@ -1660,10 +1933,10 @@ function App() {
           <button onClick={()=>go("shelf")} style={backBtn}>‹ shelf</button>
           <h2 className="serif" style={{ fontSize:24, color:C.text, margin:"0 0 4px", fontWeight:700 }}>{activeSeries}</h2>
           <div style={{ color:C.muted, fontSize:13, marginBottom:16 }}>{seriesBooks.length} book{seriesBooks.length!==1?"s":""}</div>
-          {seriesFinal!==null && !isNaN(seriesFinal) && (
+          {seriesFinal!==null && (
             <div style={{ textAlign:"center", padding:18, background:C.warm, borderRadius:12, border:`1px solid ${C.border}`, marginBottom:16 }}>
               <div style={{ fontSize:12, color:C.muted, marginBottom:4, letterSpacing:"0.06em", textTransform:"uppercase" }}>series score</div>
-              <div className="serif" style={{ fontSize:44, fontWeight:700, color:C.accent }}>{Number(seriesFinal).toFixed(2)}<span style={{ fontSize:15, color:C.muted, fontWeight:400 }}>/5</span></div>
+              <div className="serif" style={{ fontSize:44, fontWeight:700, color:C.accent }}>{seriesFinal.toFixed(2)}<span style={{ fontSize:15, color:C.muted, fontWeight:400 }}>/5</span></div>
             </div>
           )}
 
@@ -1701,7 +1974,7 @@ function App() {
                   <div style={{ fontSize:11, color:C.muted }}>{b.status}</div>
                   {b.startDate && <div style={{ fontSize:10, color:C.muted }}>started {b.startDate}</div>}
                 </div>
-                {fs!==null && !isNaN(fs) && <div className="serif" style={{ fontSize:20, fontWeight:700, color:C.accent }}>{Number(fs).toFixed(b.decimals||2)}</div>}
+                {fs!==null && <div className="serif" style={{ fontSize:20, fontWeight:700, color:C.accent }}>{fs.toFixed(b.decimals||2)}</div>}
               </div>
             );
           })}
@@ -1722,14 +1995,16 @@ function App() {
     const genreCounts = {};
     books.forEach(b=>{ if(b.genre) genreCounts[b.genre]=(genreCounts[b.genre]||0)+1; });
     const pillarAvgs = PILLARS.map(p=>{
-      const vals=books.map(b=>parseFloat((b.pillars||{})[p.key])).filter(v=>!isNaN(v) && isFinite(v));
+      const vals=books.map(b=>{ const r=getActiveRead(b); return parseFloat((r.pillars||{})[p.key]); }).filter(v=>!isNaN(v));
       return { label:p.label, avg:vals.length?vals.reduce((a,c)=>a+c,0)/vals.length:0 };
     });
     const ranges=[[1,2],[2,3],[3,4],[4,5]];
     const dist=ranges.map(([lo,hi])=>({ label:`${lo}–${hi}`, count:rated.filter(b=>{ const s=finalScore(b); return s>=lo&&s<hi; }).length }));
     const maxDist=Math.max(...dist.map(d=>d.count),1);
     const vibeDivergence=rated.reduce((best,b)=>{
-      const pa=avgPillars(b),vb=parseFloat(b.vibe);
+      const pa=avgPillars(b);
+      const read=getActiveRead(b);
+      const vb=parseFloat(read.vibe||b.vibe||"");
       if(pa===null||isNaN(vb)) return best;
       const diff=Math.abs(pa-vb);
       return diff>(best?.diff||0)?{book:b,diff,pa,vb}:best;
@@ -1771,7 +2046,7 @@ function App() {
                     <span className="serif" style={{ fontSize:13, color:C.text, fontWeight:700 }}>{b.title}</span>
                     <span style={{ fontSize:12, color:C.muted }}> — {b.author}</span>
                   </div>
-                  <span className="serif" style={{ fontSize:14, fontWeight:700, color:C.accent }}>{(finalScore(b)||0).toFixed(b.decimals||2)}</span>
+                  <span className="serif" style={{ fontSize:14, fontWeight:700, color:C.accent }}>{finalScore(b)!=null?finalScore(b).toFixed(b.decimals||2):"—"}</span>
                 </div>
               ))}
             </div>
@@ -1820,9 +2095,9 @@ function App() {
               <div style={{ fontSize:12, color:C.muted, marginBottom:6 }}>The book where your gut felt most differently from the math:</div>
               <div className="serif" style={{ fontSize:16, fontWeight:700, color:C.text }}>{vibeDivergence.book.title}</div>
               <div style={{ fontSize:12, color:C.muted, marginTop:4 }}>
-                Pillar avg: <span style={{ color:C.accent, fontWeight:600 }}>{isNaN(vibeDivergence.pa)?"—":Number(vibeDivergence.pa).toFixed(2)}</span>
-                {" · "}Vibe: <span style={{ color:C.accent, fontWeight:600 }}>{isNaN(vibeDivergence.vb)?"—":Number(vibeDivergence.vb).toFixed(2)}</span>
-                {" · "}Diff: <span style={{ color:C.amber, fontWeight:600 }}>{isNaN(vibeDivergence.diff)?"—":Number(vibeDivergence.diff).toFixed(2)}</span>
+                Pillar avg: <span style={{ color:C.accent, fontWeight:600 }}>{vibeDivergence.pa.toFixed(2)}</span>
+                {" · "}Vibe: <span style={{ color:C.accent, fontWeight:600 }}>{vibeDivergence.vb.toFixed(2)}</span>
+                {" · "}Diff: <span style={{ color:C.amber, fontWeight:600 }}>{vibeDivergence.diff.toFixed(2)}</span>
               </div>
             </div>
           )}
@@ -1864,13 +2139,20 @@ ReactDOM.createRoot(document.getElementById("root")).render(<App/>);
 
 // Service Worker (cache-first for offline)
 if ('serviceWorker' in navigator) {
+  // Cache version uses file build timestamp — auto-busts on every new file
+  const CACHE_VER = 'myshelf-1778421586';
   const sw = `
-    const CACHE = 'myshelf-v3';
+    const CACHE = '${CACHE_VER}';
     self.addEventListener('install', e => {
+      self.skipWaiting();
       e.waitUntil(caches.open(CACHE).then(c => c.addAll([self.location.href])));
     });
     self.addEventListener('activate', e => {
-      e.waitUntil(caches.keys().then(keys => Promise.all(keys.filter(k=>k!==CACHE).map(k=>caches.delete(k)))));
+      e.waitUntil(
+        caches.keys().then(keys =>
+          Promise.all(keys.filter(k=>k!==CACHE).map(k=>caches.delete(k)))
+        ).then(() => self.clients.claim())
+      );
     });
     self.addEventListener('fetch', e => {
       e.respondWith(caches.match(e.request).then(r => r || fetch(e.request).then(res => {
