@@ -86,24 +86,51 @@ const SERIES_VIBE_KEY = "amulya_series_vibe_v1";
 const SYNC_KEY = "myshelf_sync_config";
 
 // ─── LOCAL STORAGE ────────────────────────────────────────────────────────────
-const load   = () => { try { return JSON.parse(localStorage.getItem(STORAGE_KEY)) || []; } catch { return []; } };
+const load   = () => {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (!raw) return [];
+    const d = JSON.parse(raw);
+    if (!Array.isArray(d)) { console.warn("shelf data corrupt, resetting"); return []; }
+    return d.filter(b => b && typeof b === 'object' && b.id);
+  } catch(e) { console.error("load() failed:", e); return []; }
+};
 const loadSV = () => { try { return JSON.parse(localStorage.getItem(SERIES_VIBE_KEY)) || {}; } catch { return {}; } };
-const save   = (b)  => { try { localStorage.setItem(STORAGE_KEY, JSON.stringify(b)); } catch {} };
-const saveSV = (sv) => { try { localStorage.setItem(SERIES_VIBE_KEY, JSON.stringify(sv)); } catch {} };
+const save   = (b)  => {
+  if (!Array.isArray(b)) { console.error("save() rejected non-array"); return false; }
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(b));
+    return true;
+  } catch(e) {
+    console.error("save() failed:", e);
+    if (e.name === "QuotaExceededError" || e.name === "NS_ERROR_DOM_QUOTA_REACHED") {
+      try {
+        const slim = b.map(bk => ({...bk, cover: null}));
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(slim));
+        if (typeof showBanner === 'function') showBanner("⚠ storage full — covers removed", 4000);
+        return true;
+      } catch(e2) { if (typeof showBanner === 'function') showBanner("⚠ storage full — data may not save", 5000); }
+    }
+    return false;
+  }
+};
+const saveSV = (sv) => {
+  if (!sv || typeof sv !== "object" || Array.isArray(sv)) { console.error("saveSV() rejected:", sv); return false; }
+  try { localStorage.setItem(SERIES_VIBE_KEY, JSON.stringify(sv)); return true; }
+  catch(e) { console.error("saveSV() failed:", e); return false; }
+};
 const loadSyncConfig = () => { try { return JSON.parse(localStorage.getItem(SYNC_KEY)) || null; } catch { return null; } };
 const saveSyncConfig = (c) => { try { localStorage.setItem(SYNC_KEY, JSON.stringify(c)); } catch {} };
 
 // ─── HELPERS ──────────────────────────────────────────────────────────────────
 const emptyBook = () => ({
-  id: Date.now(), title: "", author: "", genre: "", status: "reading",
+  id: Date.now() + Math.floor(Math.random()*10000), // avoid id collision on fast adds
+  title: "", author: "", genre: "", status: "reading",
   seriesName: "", seriesNum: "",
   startDate: "",
   finishedDate: "",
-  // reads: array of read sessions, each with their own curve+pillars+vibe
-  // reads[0] is always the "active" read being shown by default
   reads: [],
   activeReadIdx: 0,
-  // legacy flat fields kept for backwards compat, used when reads[] is empty
   curve: [], pillars: { feeling:"", writing:"", imprint:"", pacing:"", characters:"" },
   characterRatings: [], vibe: "", decimals: 2, cover: null, bookNotes: "",
   updatedAt: Date.now(),
@@ -120,32 +147,39 @@ const emptyRead = (label) => ({
 
 // Get the active read data for a book (falls back to legacy flat fields)
 const getActiveRead = (b) => {
-  if (b.reads && b.reads.length > 0) {
-    const idx = Math.min(b.activeReadIdx || 0, b.reads.length - 1);
-    return b.reads[idx];
+  if (!b) return { id:"legacy", label:"Read 1", curve:[], pillars:{feeling:"",writing:"",imprint:"",pacing:"",characters:""}, vibe:"" };
+  if (b.reads && Array.isArray(b.reads) && b.reads.length > 0) {
+    const idx = Math.min(Math.max(0, b.activeReadIdx || 0), b.reads.length - 1);
+    return b.reads[idx] || b.reads[0];
   }
-  // legacy: wrap flat fields as a read object
-  return { id: "legacy", label: "Read 1", curve: b.curve||[], pillars: b.pillars||{feeling:"",writing:"",imprint:"",pacing:"",characters:""}, vibe: b.vibe||"" };
+  return { id:"legacy", label:"Read 1", curve: Array.isArray(b.curve)?b.curve:[], pillars: b.pillars||{feeling:"",writing:"",imprint:"",pacing:"",characters:""}, vibe: b.vibe||"" };
 };
 
 // finalScore using active read
 const finalScoreForRead = (read) => {
   if (!read) return null;
-  const vals = PILLARS.map(p => parseFloat(read.pillars[p.key])).filter(v => !isNaN(v));
-  const pa = vals.length ? vals.reduce((a,c)=>a+c,0)/vals.length : null;
-  const vibe = parseFloat(read.vibe);
-  if (pa===null && isNaN(vibe)) return null;
-  if (pa===null) return vibe;
-  if (isNaN(vibe)) return pa;
-  return Math.min(5, Math.max(1, (pa+vibe)/2));
+  try {
+    const pillars = read.pillars || {};
+    const vals = PILLARS.map(p => parseFloat(pillars[p.key])).filter(v => !isNaN(v) && isFinite(v));
+    const pa = vals.length ? vals.reduce((a,c)=>a+c,0)/vals.length : null;
+    const vibe = parseFloat(read.vibe);
+    if (pa===null && isNaN(vibe)) return null;
+    if (pa===null) return Math.min(5, Math.max(1, vibe));
+    if (isNaN(vibe)) return Math.min(5, Math.max(1, pa));
+    return Math.min(5, Math.max(1, (pa+vibe)/2));
+  } catch(e) { return null; }
 };
 
 const clampNum = (v, min, max) => { const n = parseFloat(v); return isNaN(n) ? v : Math.min(max, Math.max(min, n)); };
 
 const avgPillars = (b) => {
-  const read = getActiveRead ? getActiveRead(b) : b;
-  const vals = PILLARS.map(p => parseFloat((read.pillars||b.pillars||{})[p.key])).filter(v => !isNaN(v));
-  return vals.length ? vals.reduce((a,c)=>a+c,0)/vals.length : null;
+  if (!b) return null;
+  try {
+    const read = getActiveRead(b);
+    const pillars = (read && read.pillars) ? read.pillars : (b.pillars || {});
+    const vals = PILLARS.map(p => parseFloat(pillars[p.key])).filter(v => !isNaN(v) && isFinite(v));
+    return vals.length ? vals.reduce((a,c)=>a+c,0)/vals.length : null;
+  } catch(e) { return null; }
 };
 
 const finalScore = (b) => {
@@ -157,29 +191,31 @@ const finalScore = (b) => {
 // Uses Supabase REST API directly — no library needed.
 // User provides their Supabase URL + anon key + a unique user ID.
 const supabaseFetch = async (url, anonKey, path, method="GET", body=null) => {
-  const headers = {
-    "apikey": anonKey,
-    "Authorization": `Bearer ${anonKey}`,
-    "Content-Type": "application/json",
+  const opts = {
+    method,
+    headers: {
+      "apikey": anonKey,
+      "Authorization": `Bearer ${anonKey}`,
+      "Content-Type": "application/json",
+      "Prefer": method==="POST" ? "resolution=merge-duplicates,return=representation" : "return=representation",
+    },
   };
-  // Only add Prefer header for non-GET requests
-  if (method !== "GET") headers["Prefer"] = "resolution=merge-duplicates,return=minimal";
-  const opts = { method, headers };
   if (body) opts.body = JSON.stringify(body);
   const res = await fetch(`${url}/rest/v1${path}`, opts);
   if (!res.ok) { const t = await res.text(); throw new Error(t); }
-  if (res.status === 204) return null;
-  const text = await res.text();
-  if (!text || text === "") return null;
-  try { return JSON.parse(text); } catch(e) { throw new Error("Bad JSON from server: " + text.slice(0,100)); }
+  return res.status === 204 ? null : res.json();
 };
 
 const syncToCloud = async (cfg, books, seriesVibes) => {
   const { url, anonKey, userId } = cfg;
+  if (!url || !anonKey || !userId) throw new Error("syncToCloud: missing config");
+  if (!Array.isArray(books) || books.length === 0) throw new Error("syncToCloud: refusing to push empty/invalid books");
+  // Strip covers from sync to keep payload small
+  const booksForSync = books.map(b => ({...b, cover: null}));
   const payload = {
     user_id: userId,
-    books_json: JSON.stringify(books),
-    series_json: JSON.stringify(seriesVibes),
+    books_json: JSON.stringify(booksForSync),
+    series_json: JSON.stringify(seriesVibes||{}),
     updated_at: new Date().toISOString(),
   };
   // Upsert: POST with merge-duplicates — works whether row exists or not
@@ -295,7 +331,7 @@ function ScoreField({ label, prompt, value, onChange, max=5, decimals=2 }) {
 }
 
 function MiniCurve({ curve }) {
-  if (!curve.length) return null;
+  if (!curve || !curve.length) return null;
   const W=300, H=44, pad=4, n=curve.length;
   const pts = curve.map((pt,i)=>{
     const x = pad+(n===1?(W-pad*2)/2:(i/(n-1))*(W-pad*2));
@@ -311,7 +347,7 @@ function MiniCurve({ curve }) {
 
 function CurveGraph({ curve }) {
   const [tooltip, setTooltip] = useState(null);
-  if (!curve.length) return <div style={{ color:C.muted, fontSize:13, textAlign:"center", padding:"20px 0" }}>No shifts logged yet.</div>;
+  if (!curve || !curve.length) return <div style={{ color:C.muted, fontSize:13, textAlign:"center", padding:"20px 0" }}>No shifts logged yet.</div>;
   const W=500, H=180, pL=30, pR=14, pT=10, pB=32;
   const plotW=W-pL-pR, plotH=H-pT-pB, n=curve.length;
   const pts=curve.map((pt,i)=>({
@@ -356,7 +392,7 @@ function CurveGraph({ curve }) {
 }
 
 function RadarDisplay({ book }) {
-  const data = PILLARS.map(p=>({ label:p.label, value:parseFloat(book.pillars[p.key])||0 }));
+  const data = PILLARS.map(p=>({ label:p.label, value:parseFloat((book.pillars||{})[p.key])||0 }));
   if (!data.some(d=>d.value>0)) return <div style={{ color:C.muted, fontSize:13, textAlign:"center", padding:"20px 0" }}>Rate pillars to see radar.</div>;
   const cx=150, cy=115, r=75, n=data.length, off=-Math.PI/2;
   const ang=i=>off+(i/n)*2*Math.PI;
@@ -391,8 +427,9 @@ function Modal({ children, onClose }) {
 // ─── SHARE CARD ───────────────────────────────────────────────────────────────
 // Rendered inline (no modal) to avoid the white-screen routing bug.
 function ShareCard({ book, onClose }) {
+  if (!book) return null;
   const fs = finalScore(book);
-  const radarData = PILLARS.map(p=>({ label:p.label, value:parseFloat(book.pillars[p.key])||0 }));
+  const radarData = PILLARS.map(p=>({ label:p.label, value:parseFloat((book.pillars||{})[p.key])||0 }));
   const hasRadar = radarData.some(d=>d.value>0);
 
   return (
@@ -427,7 +464,7 @@ function ShareCard({ book, onClose }) {
 
         {/* Pillar scores */}
         <div style={{ borderTop:`1px solid ${C.border}`, paddingTop:12, marginBottom:12 }}>
-          {PILLARS.map(p=>{ const v=parseFloat(book.pillars[p.key]); return (
+          {PILLARS.map(p=>{ const v=parseFloat((book.pillars||{})[p.key]); return (
             <div key={p.key} style={{ display:"flex", justifyContent:"space-between", fontSize:13, padding:"6px 0", borderBottom:`1px solid ${C.border}` }}>
               <span style={{ color:C.muted }}>{p.label}</span>
               <span style={{ fontWeight:600, color:C.accent }}>{isNaN(v)?"—":v}</span>
@@ -571,16 +608,135 @@ function SharePage({ data }) {
   );
 }
 
+// \u2500\u2500\u2500 SHELF VIEW PAGE (read-only, shown when ?shelf= is in URL) \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+function ShelfViewPage({ books }) {
+  // Guard: if books is not a valid array, show error
+  if (!Array.isArray(books) || !books.length) {
+    return (
+      <div style={{ minHeight:"100vh", background:C.bg, display:"flex", alignItems:"center", justifyContent:"center" }}>
+        <div style={{ textAlign:"center", color:C.muted, fontSize:14 }}>
+          <Logo size={48}/>
+          <div style={{ marginTop:16 }}>This shelf link appears to be empty or invalid.</div>
+        </div>
+      </div>
+    );
+  }
+  return (
+    <div style={{ minHeight:"100vh", background:C.bg }}>
+      <div style={{ maxWidth:"var(--max-w,580px)", margin:"0 auto", padding:"28px 18px" }}>
+        <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:16 }}>
+          <div style={{ display:"flex", alignItems:"center", gap:10 }}>
+            <Logo size={34}/>
+            <h1 className="serif" style={{ fontSize:28, color:C.text, margin:0, fontWeight:700, letterSpacing:"-0.01em" }}>my shelf</h1>
+          </div>
+          <div style={{ fontSize:11, color:C.muted, fontStyle:"italic" }}>view only</div>
+        </div>
+        <div className="book-grid" style={{ marginBottom:20 }}>
+          {books.map((b, idx) => {
+            const finished = b.status === "finished";
+            const fs = (b.score !== null && b.score !== undefined) ? Number(b.score) : null;
+            return (
+              <div key={idx} style={{ background:C.warm, border:`1px solid ${C.border}`, borderRadius:12, position:"relative", overflow:"hidden", padding:"14px 12px" }}>
+                {finished && <div style={{ position:"absolute", top:10, right:-18, width:80, textAlign:"center", background:C.accentL, color:C.white, fontSize:9, fontWeight:700, letterSpacing:"0.05em", padding:"3px 0", transform:"rotate(35deg)", zIndex:2 }}>READ</div>}
+                {b.cover
+                  ? <img src={b.cover} alt="" style={{ width:"100%", height:80, objectFit:"cover", borderRadius:8, marginBottom:10 }} onError={e=>{ e.target.style.display='none'; }}/>
+                  : <div style={{ width:"100%", height:54, display:"flex", alignItems:"center", justifyContent:"center", marginBottom:6 }}><BookArt size={38}/></div>}
+                <div className="serif" style={{ fontSize:13, fontWeight:700, color:C.text, marginBottom:2, lineHeight:1.3 }}>{b.title||"Untitled"}</div>
+                <div style={{ fontSize:11, color:C.muted, marginBottom:6 }}>{b.author||""}</div>
+                {b.seriesName && (
+                  <div style={{ display:"inline-block", fontSize:10, color:C.accent, background:C.bg, border:`1px solid ${C.accentL}`, borderRadius:20, padding:"2px 8px", marginBottom:6 }}>
+                    {b.seriesName}{b.seriesNum ? ` #${b.seriesNum}` : ""}
+                  </div>
+                )}
+                <div style={{ marginTop:6, display:"flex", justifyContent:"space-between", alignItems:"flex-end" }}>
+                  {fs !== null && !isNaN(fs)
+                    ? <span className="serif" style={{ fontSize:24, fontWeight:700, color:C.accent, lineHeight:1 }}>{fs.toFixed(b.decimals||2)}<span style={{ fontSize:10, color:C.muted, fontWeight:400 }}>/5</span></span>
+                    : <span style={{ fontSize:12, color:C.muted }}>unrated</span>}
+                  <span style={{ fontSize:10, color:C.muted, background:C.border, padding:"2px 6px", borderRadius:20 }}>{b.status||""}</span>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+        <div style={{ fontSize:11, color:C.muted, textAlign:"center", marginTop:16, fontStyle:"italic" }}>shared from my shelf \u2736</div>
+      </div>
+    </div>
+  );
+}
+
+// \u2500\u2500\u2500 SHELF SHARE LINK MODAL \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+function ShelfShareLinkModal({ books, onClose }) {
+  const [copied, setCopied] = useState(false);
+  const [urlStr, setUrlStr] = useState("");
+
+  React.useEffect(()=>{
+    try {
+      const shelfData = books.map(b => {
+        const read = getActiveRead(b);
+        return {
+          title: b.title, author: b.author, genre: b.genre,
+          seriesName: b.seriesName, seriesNum: b.seriesNum,
+          status: b.status, cover: b.cover || null,
+          score: finalScoreForRead(read),
+          decimals: b.decimals || 2,
+        };
+      });
+      const encoded = btoa(unescape(encodeURIComponent(JSON.stringify(shelfData))));
+      setUrlStr(window.location.href.split('?')[0] + '?shelf=' + encoded);
+    } catch(e) {
+      console.error("ShelfShareLinkModal: failed to encode shelf data", e);
+    }
+  }, [books]);
+
+  const copy = () => {
+    if (!urlStr) return;
+    navigator.clipboard.writeText(urlStr).then(()=>{ setCopied(true); setTimeout(()=>setCopied(false), 2000); }).catch(()=>{
+      // Fallback for browsers that block clipboard
+      const ta = document.createElement('textarea');
+      ta.value = urlStr; document.body.appendChild(ta); ta.select();
+      try { document.execCommand('copy'); setCopied(true); setTimeout(()=>setCopied(false),2000); } catch(e2) {}
+      document.body.removeChild(ta);
+    });
+  };
+
+  return (
+    <Modal onClose={onClose}>
+      <div style={{ fontFamily:"'Playfair Display',serif", fontSize:18, fontWeight:700, color:C.text, marginBottom:6 }}>share your shelf</div>
+      <div style={{ fontSize:12, color:C.muted, marginBottom:16, lineHeight:1.6 }}>
+        Anyone with this link can view a read-only snapshot of your shelf \u2014 titles, covers, scores and statuses. No account needed.
+      </div>
+      <div style={{ background:C.warm, border:`1px solid ${C.border}`, borderRadius:8, padding:"10px 12px", fontSize:11, color:C.muted, wordBreak:"break-all", marginBottom:14, lineHeight:1.5, maxHeight:80, overflowY:"auto" }}>
+        {urlStr || "generating link\u2026"}
+      </div>
+      <button onClick={copy} disabled={!urlStr} style={primaryBtn}>{copied ? "copied \u2713" : "copy link"}</button>
+      <div style={{ marginTop:8 }}>
+        <button onClick={onClose} style={{ ...ghostBtn(C.muted), fontSize:12 }}>close</button>
+      </div>
+    </Modal>
+  );
+}
+
 function App() {
   // Check if this is a share link view
   const urlParams = new URLSearchParams(window.location.search);
   const shareParam = urlParams.get("share");
   if (shareParam) {
     try {
-      const data = JSON.parse(decodeURIComponent(escape(atob(shareParam))));
+      const data = JSON.parse(decodeURIComponent(escape(atob(shareParam.replace(/-/g,'+').replace(/_/g,'/')))));
       return <SharePage data={data}/>;
     } catch(e) {
       // invalid share param, fall through to normal app
+    }
+  }
+
+  // Check if this is a shelf share link view
+  const shelfParam = urlParams.get("shelf");
+  if (shelfParam) {
+    try {
+      const shelfData = JSON.parse(decodeURIComponent(escape(atob(shelfParam.replace(/-/g,'+').replace(/_/g,'/')))));
+      if (Array.isArray(shelfData)) return <ShelfViewPage books={shelfData}/>;
+    } catch(e) {
+      // invalid shelf param, fall through to normal app
     }
   }
 
@@ -606,6 +762,8 @@ function App() {
   const [syncStatus, setSyncStatus] = useState(null);
   const [search, setSearch] = useState("");
   const [shareLinkBook, setShareLinkBook] = useState(null); // book being shared as link
+  const [shelfShareLinkOpen, setShelfShareLinkOpen] = useState(false);
+  const [bootPullDone, setBootPullDone] = useState(false);
   const [dragOrder, setDragOrder] = useState(null); // custom order array of book ids
   const [dragIdx, setDragIdx] = useState(null);
   const [dragOverIdx, setDragOverIdx] = useState(null);
@@ -615,53 +773,23 @@ function App() {
   useEffect(()=>{ save(books); }, [books]);
   useEffect(()=>{ saveSV(seriesVibes); }, [seriesVibes]);
 
-  // ── AUTO-PULL ON STARTUP ──────────────────────────────────────────────────
-  // On first load, if sync is configured, pull from cloud and merge with local.
-  // This ensures changes made on another device are picked up immediately.
+  // ── AUTO-PULL ON STARTUP ──────────────────────────────────────────
+  // SAFE: never push until pull completes; never push empty array to cloud
   useEffect(()=>{
     if (!syncConfig || bootSynced) return;
     setBootSynced(true);
-    const cfg = syncConfig;
     showBanner("checking for updates…");
-    syncFromCloud(cfg).then(remote => {
-      if (!remote || !remote.books) {
-        showBanner("no cloud data found", 2000);
-        console.warn("Boot sync: empty response", remote);
-        return;
+    syncFromCloud(syncConfig).then(remote => {
+      if (!remote || !Array.isArray(remote.books) || remote.books.length === 0) {
+        showBanner("", 1); setBootPullDone(true); return;
       }
-      console.log("Boot sync: got", remote.books.length, "books from cloud");
-      if (remote.books.length === 0) {
-        showBanner("cloud is empty — your local data is safe", 2500);
-        return;
-      }
-      setBooks(prev => {
-        const remoteMap = {};
-        remote.books.forEach(b => remoteMap[b.id] = b);
-        const localMap = {};
-        prev.forEach(b => localMap[b.id] = b);
-        const allIds = new Set([...Object.keys(remoteMap), ...Object.keys(localMap)]);
-        const merged = [];
-        allIds.forEach(id => {
-          const r = remoteMap[id], l = localMap[id];
-          if (r && l) {
-            merged.push((r.updatedAt||0) >= (l.updatedAt||0) ? r : l);
-          } else {
-            merged.push(r || l);
-          }
-        });
-        save(merged);
-        return merged;
-      });
-      setSeriesVibes(prev => {
-        const merged = {...prev, ...remote.seriesVibes};
-        saveSV(merged);
-        return merged;
-      });
-      showBanner("synced ✓", 1800);
+      setBooks(prev => { const m = mergeBooks(prev, remote.books); save(m); return m; });
+      setSeriesVibes(prev => { const m = mergeSeries(prev, remote.seriesVibes||{}); saveSV(m); return m; });
+      showBanner("up to date ✓", 1800);
     }).catch(e => {
-      showBanner("sync failed — " + e.message, 3500);
-      console.error("Boot sync error:", e);
-    });
+      showBanner("", 1);
+      console.warn("Boot sync failed:", e);
+    }).finally(()=>{ setBootPullDone(true); });
   }, [syncConfig]);
 
   // Refs so debounced sync always sees latest state
@@ -679,6 +807,10 @@ function App() {
     syncTimer.current = setTimeout(async ()=>{
       const cfg = syncConfigRef.current;
       if (!cfg) return;
+      // SAFETY: never push until we have pulled from cloud on startup
+      if (!bootPullDone) { console.warn("Auto-sync skipped: boot pull not done"); return; }
+      // SAFETY: never push empty books array — would wipe cloud data
+      if (!booksRef.current || booksRef.current.length === 0) { console.warn("Auto-sync skipped: empty books"); return; }
       showBanner("syncing…");
       try {
         await syncToCloud(cfg, booksRef.current, seriesVibesRef.current);
@@ -687,7 +819,7 @@ function App() {
         showBanner("sync failed — " + e.message, 3500);
       }
     }, 1200);
-  }, [books, seriesVibes]);
+  }, [books, seriesVibes, bootPullDone]);
 
   const showBanner = (msg, hide=0) => {
     const b = document.getElementById("sync-banner");
@@ -714,7 +846,8 @@ function App() {
           saveSV(merged);
           return merged;
         });
-        showBanner("pulled ✓ (" + remote.books.length + " books)", 2500);
+        setDragOrder(null);
+      showBanner("pulled ✓ (" + remote.books.length + " books)", 2500);
       } else {
         showBanner("no remote data found", 2000);
       }
@@ -725,14 +858,18 @@ function App() {
   };
 
   const active = books.find(b=>b.id===activeId);
-  const upd = (id,fn) => setBooks(bs=>bs.map(b=>b.id===id?{...fn(b),updatedAt:Date.now()}:b));
+  const upd = (id,fn) => setBooks(bs=>bs.map(b=>{
+    if (b.id!==id) return b;
+    try { return {...fn(b), updatedAt:Date.now()}; }
+    catch(e) { console.error("upd() fn threw for book", id, e); return b; }
+  }));
   const go = (v, extra={}) => {
     if(extra.id) setActiveId(extra.id);
     if(extra.series) setActiveSeries(extra.series);
     setView(v);
     setMenuOpen(false);
-    setShareOpen(false);  // always close share on navigation
-    window.scrollTo(0,0);
+    setShareOpen(false);
+    try { window.scrollTo(0,0); } catch(e) {}
   };
 
   const exportJSON = () => {
@@ -749,14 +886,14 @@ function App() {
       try {
         const imported = JSON.parse(ev.target.result);
         if (Array.isArray(imported)) {
+          const valid = imported.filter(b => b && typeof b === 'object').map(b => b.id ? b : {...b, id: Date.now()+Math.random()});
           setBooks(prev => {
             const ids = new Set(prev.map(b=>b.id));
-            const merged = [...prev, ...imported.filter(b=>!ids.has(b.id))];
-            return merged;
+            return [...prev, ...valid.filter(b=>!ids.has(b.id))];
           });
-          showBanner("imported "+imported.length+" books ✓", 2500);
-        }
-      } catch { showBanner("import failed — invalid file", 2500); }
+          showBanner("imported "+valid.length+" books ✓", 2500);
+        } else { showBanner("import failed — not a valid shelf file", 2500); }
+      } catch(e) { console.error("import:", e); showBanner("import failed — invalid JSON", 2500); }
     };
     reader.readAsText(file);
     e.target.value="";
@@ -857,6 +994,10 @@ function App() {
                     style={{ display:"block", width:"100%", textAlign:"left", background:"none", border:"none", color:syncConfig?C.accent:C.text, fontSize:13, padding:"7px 12px", cursor:"pointer", borderRadius:6, fontWeight:syncConfig?600:400 }}>
                     {syncConfig?"✦ sync connected":"set up sync"}
                   </button>
+                  <button onClick={()=>{ setShelfShareLinkOpen(true); setMenuOpen(false); }}
+                    style={{ display:"block", width:"100%", textAlign:"left", background:"none", border:"none", color:C.text, fontSize:13, padding:"7px 12px", cursor:"pointer", borderRadius:6 }}>
+                    ↗ share shelf (view-only)
+                  </button>
                 </div>
               )}
             </div>
@@ -898,7 +1039,7 @@ function App() {
                       <div style={{ fontSize:11, color:C.muted, marginBottom:4 }}>{b.author}</div>
                       {b.startDate && <div style={{ fontSize:10, color:C.muted }}>started {b.startDate}</div>}
                     </div>
-                    {fs!==null && <span className="serif" style={{ fontSize:22, fontWeight:700, color:C.accent, flexShrink:0 }}>{fs.toFixed(b.decimals||2)}</span>}
+                    {fs!==null && !isNaN(fs) && <span className="serif" style={{ fontSize:22, fontWeight:700, color:C.accent, flexShrink:0 }}>{Number(fs).toFixed(b.decimals||2)}</span>}
                   </div>
                 );
               })}
@@ -942,7 +1083,7 @@ function App() {
                   )}
                   <div onClick={()=>go("book",{id:b.id})}>
                     {b.cover
-                      ? <img src={b.cover} alt="" style={{ width:"100%", height:80, objectFit:"cover", borderRadius:8, marginBottom:10 }}/>
+                      ? <img src={b.cover} alt="" style={{ width:"100%", height:80, objectFit:"cover", borderRadius:8, marginBottom:10 }} onError={e=>{ e.target.style.display='none'; }}/>
                       : <div style={{ width:"100%", height:54, display:"flex", alignItems:"center", justifyContent:"center", marginBottom:6 }}><BookArt size={38}/></div>}
                     <div className="serif" style={{ fontSize:13, fontWeight:700, color:C.text, marginBottom:2, lineHeight:1.3 }}>{b.title||"Untitled"}</div>
                     <div style={{ fontSize:11, color:C.muted, marginBottom:6 }}>{b.author}</div>
@@ -955,8 +1096,8 @@ function App() {
                   )}
                   <div onClick={()=>go("book",{id:b.id})}>
                     <div style={{ marginTop:6, display:"flex", justifyContent:"space-between", alignItems:"flex-end" }}>
-                      {fs!==null
-                        ? <span className="serif" style={{ fontSize:24, fontWeight:700, color:C.accent, lineHeight:1 }}>{fs.toFixed(b.decimals||2)}<span style={{ fontSize:10, color:C.muted, fontWeight:400 }}>/5</span></span>
+                      {fs!==null && !isNaN(fs)
+                        ? <span className="serif" style={{ fontSize:24, fontWeight:700, color:C.accent, lineHeight:1 }}>{Number(fs).toFixed(b.decimals||2)}<span style={{ fontSize:10, color:C.muted, fontWeight:400 }}>/5</span></span>
                         : <span style={{ fontSize:12, color:C.muted }}>unrated</span>}
                       <span style={{ fontSize:10, color:C.muted, background:C.border, padding:"2px 6px", borderRadius:20 }}>{b.status}</span>
                     </div>
@@ -970,6 +1111,7 @@ function App() {
       </div>
       {syncSetupOpen && <SyncSetup existing={syncConfig} onSave={cfg=>{ saveSyncConfig(cfg); setSyncConfig(cfg); setSyncSetupOpen(false); }} onClose={()=>setSyncSetupOpen(false)}/>}
       {shareLinkBook && <ShareLinkModal book={shareLinkBook} onClose={()=>setShareLinkBook(null)}/>}
+      {shelfShareLinkOpen && <ShelfShareLinkModal books={books} onClose={()=>setShelfShareLinkOpen(false)}/>}
     </div>
   );
   }
@@ -1040,24 +1182,29 @@ function App() {
     const fs = finalScoreForRead(currentRead);
 
     const generateShareLink = () => {
-      const data = {
-        title: active.title, author: active.author, genre: active.genre,
-        seriesName: active.seriesName, seriesNum: active.seriesNum,
-        pillars: currentRead.pillars, vibe: currentRead.vibe,
-        decimals: active.decimals||2,
-        score: fs,
-      };
-      const encoded = btoa(unescape(encodeURIComponent(JSON.stringify(data))));
-      const url = window.location.href.split('?')[0] + '?share=' + encoded;
-      navigator.clipboard.writeText(url).catch(()=>{});
-      setShareLinkBook({ ...data, _url: url });
+      try {
+        const data = {
+          title: active.title||"", author: active.author||"", genre: active.genre||"",
+          seriesName: active.seriesName||"", seriesNum: active.seriesNum||"",
+          pillars: currentRead.pillars||{}, vibe: currentRead.vibe||"",
+          decimals: active.decimals||2,
+          score: fs,
+        };
+        const encoded = btoa(unescape(encodeURIComponent(JSON.stringify(data))));
+        const url = (window.location.href.split('?')[0]) + '?share=' + encoded;
+        navigator.clipboard.writeText(url).catch(()=>{});
+        setShareLinkBook({ ...data, _url: url });
+      } catch(e) {
+        console.error("generateShareLink failed:", e);
+        showBanner("failed to generate link", 2500);
+      }
     };
 
     return (
     <div style={pageStyle} className="fade-in">
       <div style={wrapStyle(520)}>
         <button onClick={()=>go("shelf")} style={backBtn}>‹ shelf</button>
-        {active.cover && <img src={active.cover} alt="" style={{ width:"100%", maxHeight:200, objectFit:"cover", borderRadius:14, marginBottom:20 }}/>}
+        {active.cover && <img src={active.cover} alt="" style={{ width:"100%", maxHeight:200, objectFit:"cover", borderRadius:14, marginBottom:20 }} onError={e=>{ e.target.style.display='none'; }}/>}
         <div style={{ marginBottom:20 }}>
           {active.seriesName && (
             <div onClick={()=>go("series",{series:active.seriesName})}
@@ -1082,9 +1229,9 @@ function App() {
             }
             return <div style={{ fontSize:11, color:C.muted, marginBottom:4 }}>{line}</div>;
           })()}
-          {fs!==null && (
+          {fs!==null && !isNaN(fs) && (
             <div style={{ marginTop:10 }}>
-              <span className="serif" style={{ fontSize:44, fontWeight:700, color:C.accent, lineHeight:1 }}>{fs.toFixed(active.decimals||2)}</span>
+              <span className="serif" style={{ fontSize:44, fontWeight:700, color:C.accent, lineHeight:1 }}>{Number(fs).toFixed(active.decimals||2)}</span>
               <span style={{ fontSize:14, color:C.muted, fontWeight:400 }}> / 5</span>
             </div>
           )}
@@ -1107,8 +1254,8 @@ function App() {
                 </button>
               ))}
               <button onClick={()=>{
-                const newRead = emptyRead(`Read ${(reads.length)+1}`);
-                upd(active.id, b=>({ ...b, reads:[...(b.reads||[]), newRead], activeReadIdx:(b.reads||[]).length }));
+                const newRead = emptyRead(`Read ${((reads||[]).length)+1}`);
+                upd(active.id, b=>({ ...b, reads:[...(Array.isArray(b.reads)?b.reads:[]), newRead], activeReadIdx:(Array.isArray(b.reads)?b.reads:[]).length }));
               }} style={{ padding:"6px 12px", borderRadius:20, border:`1px solid ${C.border}`, background:"transparent", color:C.muted, fontSize:12, cursor:"pointer" }}>+ reread</button>
             </div>
           </div>
@@ -1195,6 +1342,7 @@ function App() {
         <button onClick={()=>{
           if(window.confirm("Remove this book from your shelf?")) {
             setBooks(bs=>bs.filter(b=>b.id!==active.id));
+            setDragOrder(prev => prev ? prev.filter(id => id !== active.id) : null);
             go("shelf");
           }
         }} style={ghostBtn(C.danger)}>remove book</button>
@@ -1203,7 +1351,7 @@ function App() {
       {editShiftsOpen && (() => {
         const curve = currentRead.curve||[];
         const updateCurve = (newCurve) => {
-          if (reads) upd(active.id,b=>({...b,reads:b.reads.map((r,ri)=>ri===activeReadIdx?{...r,curve:newCurve}:r)}));
+          if (reads) upd(active.id,b=>({...b,reads:(Array.isArray(b.reads)?b.reads:[]).map((r,ri)=>ri===activeReadIdx?{...r,curve:newCurve}:r)}));
           else upd(active.id,b=>({...b,curve:newCurve}));
         };
         let shiftDragIdx = null;
@@ -1344,7 +1492,7 @@ function App() {
       };
 
       if (reads) {
-        upd(active.id,b=>({...b,reads:b.reads.map((r,ri)=>ri===activeReadIdx?{...r,curve:buildNewCurve(r.curve||[])}:r)}));
+        upd(active.id,b=>({...b,reads:(Array.isArray(b.reads)?b.reads:[]).map((r,ri)=>ri===activeReadIdx?{...r,curve:buildNewCurve(r.curve||[])}:r)}));
       } else {
         upd(active.id,b=>({...b,curve:buildNewCurve(b.curve||[])}));
       }
@@ -1397,11 +1545,11 @@ function App() {
     const fs = finalScoreForRead(currentRead);
 
     const updPillar = (key, v) => {
-      if (reads) upd(active.id,b=>({...b,reads:b.reads.map((r,ri)=>ri===activeReadIdx?{...r,pillars:{...r.pillars,[key]:v}}:r)}));
+      if (reads) upd(active.id,b=>({...b,reads:(Array.isArray(b.reads)?b.reads:[]).map((r,ri)=>ri===activeReadIdx?{...r,pillars:{...(r.pillars||{}),[key]:v}}:r)}));
       else upd(active.id,b=>({...b,pillars:{...b.pillars,[key]:v}}));
     };
     const updVibe = (v) => {
-      if (reads) upd(active.id,b=>({...b,reads:b.reads.map((r,ri)=>ri===activeReadIdx?{...r,vibe:v}:r)}));
+      if (reads) upd(active.id,b=>({...b,reads:(Array.isArray(b.reads)?b.reads:[]).map((r,ri)=>ri===activeReadIdx?{...r,vibe:v}:r)}));
       else upd(active.id,b=>({...b,vibe:v}));
     };
 
@@ -1421,10 +1569,10 @@ function App() {
           <ScoreField label="Vibe" prompt="Pure gut feeling. No logic. How do you feel about this book right now?" max={5}
             value={currentRead.vibe||""} decimals={active.decimals||2}
             onChange={updVibe}/>
-          {fs!==null && (
+          {fs!==null && !isNaN(fs) && (
             <div style={{ textAlign:"center", padding:18, background:C.warm, borderRadius:12, border:`1px solid ${C.border}`, margin:"12px 0" }}>
               <div style={{ fontSize:12, color:C.muted, marginBottom:4, letterSpacing:"0.06em", textTransform:"uppercase" }}>final score</div>
-              <div className="serif" style={{ fontSize:42, fontWeight:700, color:C.accent }}>{fs.toFixed(active.decimals||2)}<span style={{ fontSize:16, color:C.muted, fontWeight:400 }}> / 5</span></div>
+              <div className="serif" style={{ fontSize:42, fontWeight:700, color:C.accent }}>{Number(fs).toFixed(active.decimals||2)}<span style={{ fontSize:16, color:C.muted, fontWeight:400 }}> / 5</span></div>
             </div>
           )}
           <button onClick={()=>go("book")} style={primaryBtn}>save & go back</button>
@@ -1435,7 +1583,7 @@ function App() {
 
   // ── SERIES ─────────────────────────────────────────────────────────────────
   if (view==="series" && activeSeries) {
-    const seriesBooks = books.filter(b=>b.seriesName===activeSeries).sort((a,b)=>(parseFloat(a.seriesNum)||0)-(parseFloat(b.seriesNum)||0));
+    const seriesBooks = books.filter(b=>b && b.seriesName===activeSeries).sort((a,b)=>(parseFloat(a.seriesNum)||0)-(parseFloat(b.seriesNum)||0));
     const scores = seriesBooks.map(b=>finalScore(b)).filter(v=>v!==null);
     const avgScore = scores.length ? scores.reduce((a,c)=>a+c,0)/scores.length : null;
     const sv = parseFloat(seriesVibes[activeSeries]||"");
@@ -1512,10 +1660,10 @@ function App() {
           <button onClick={()=>go("shelf")} style={backBtn}>‹ shelf</button>
           <h2 className="serif" style={{ fontSize:24, color:C.text, margin:"0 0 4px", fontWeight:700 }}>{activeSeries}</h2>
           <div style={{ color:C.muted, fontSize:13, marginBottom:16 }}>{seriesBooks.length} book{seriesBooks.length!==1?"s":""}</div>
-          {seriesFinal!==null && (
+          {seriesFinal!==null && !isNaN(seriesFinal) && (
             <div style={{ textAlign:"center", padding:18, background:C.warm, borderRadius:12, border:`1px solid ${C.border}`, marginBottom:16 }}>
               <div style={{ fontSize:12, color:C.muted, marginBottom:4, letterSpacing:"0.06em", textTransform:"uppercase" }}>series score</div>
-              <div className="serif" style={{ fontSize:44, fontWeight:700, color:C.accent }}>{seriesFinal.toFixed(2)}<span style={{ fontSize:15, color:C.muted, fontWeight:400 }}>/5</span></div>
+              <div className="serif" style={{ fontSize:44, fontWeight:700, color:C.accent }}>{Number(seriesFinal).toFixed(2)}<span style={{ fontSize:15, color:C.muted, fontWeight:400 }}>/5</span></div>
             </div>
           )}
 
@@ -1553,7 +1701,7 @@ function App() {
                   <div style={{ fontSize:11, color:C.muted }}>{b.status}</div>
                   {b.startDate && <div style={{ fontSize:10, color:C.muted }}>started {b.startDate}</div>}
                 </div>
-                {fs!==null && <div className="serif" style={{ fontSize:20, fontWeight:700, color:C.accent }}>{fs.toFixed(b.decimals||2)}</div>}
+                {fs!==null && !isNaN(fs) && <div className="serif" style={{ fontSize:20, fontWeight:700, color:C.accent }}>{Number(fs).toFixed(b.decimals||2)}</div>}
               </div>
             );
           })}
@@ -1574,7 +1722,7 @@ function App() {
     const genreCounts = {};
     books.forEach(b=>{ if(b.genre) genreCounts[b.genre]=(genreCounts[b.genre]||0)+1; });
     const pillarAvgs = PILLARS.map(p=>{
-      const vals=books.map(b=>parseFloat(b.pillars[p.key])).filter(v=>!isNaN(v));
+      const vals=books.map(b=>parseFloat((b.pillars||{})[p.key])).filter(v=>!isNaN(v) && isFinite(v));
       return { label:p.label, avg:vals.length?vals.reduce((a,c)=>a+c,0)/vals.length:0 };
     });
     const ranges=[[1,2],[2,3],[3,4],[4,5]];
@@ -1623,7 +1771,7 @@ function App() {
                     <span className="serif" style={{ fontSize:13, color:C.text, fontWeight:700 }}>{b.title}</span>
                     <span style={{ fontSize:12, color:C.muted }}> — {b.author}</span>
                   </div>
-                  <span className="serif" style={{ fontSize:14, fontWeight:700, color:C.accent }}>{finalScore(b).toFixed(b.decimals)}</span>
+                  <span className="serif" style={{ fontSize:14, fontWeight:700, color:C.accent }}>{(finalScore(b)||0).toFixed(b.decimals||2)}</span>
                 </div>
               ))}
             </div>
@@ -1672,9 +1820,9 @@ function App() {
               <div style={{ fontSize:12, color:C.muted, marginBottom:6 }}>The book where your gut felt most differently from the math:</div>
               <div className="serif" style={{ fontSize:16, fontWeight:700, color:C.text }}>{vibeDivergence.book.title}</div>
               <div style={{ fontSize:12, color:C.muted, marginTop:4 }}>
-                Pillar avg: <span style={{ color:C.accent, fontWeight:600 }}>{vibeDivergence.pa.toFixed(2)}</span>
-                {" · "}Vibe: <span style={{ color:C.accent, fontWeight:600 }}>{vibeDivergence.vb.toFixed(2)}</span>
-                {" · "}Diff: <span style={{ color:C.amber, fontWeight:600 }}>{vibeDivergence.diff.toFixed(2)}</span>
+                Pillar avg: <span style={{ color:C.accent, fontWeight:600 }}>{isNaN(vibeDivergence.pa)?"—":Number(vibeDivergence.pa).toFixed(2)}</span>
+                {" · "}Vibe: <span style={{ color:C.accent, fontWeight:600 }}>{isNaN(vibeDivergence.vb)?"—":Number(vibeDivergence.vb).toFixed(2)}</span>
+                {" · "}Diff: <span style={{ color:C.amber, fontWeight:600 }}>{isNaN(vibeDivergence.diff)?"—":Number(vibeDivergence.diff).toFixed(2)}</span>
               </div>
             </div>
           )}
